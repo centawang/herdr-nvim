@@ -30,6 +30,7 @@ const SHORT: &[&str] = &[
     "open",
     "fs",
     "app-find",
+    "app-files",
     "app-current",
     "app-reveal",
     "app-preview",
@@ -49,6 +50,10 @@ fn deadline(after: std::time::Duration) {
 }
 
 fn main() {
+    if let Err(error) = app::entry::configure() {
+        eprintln!("herdr-nvim: {error:#}");
+        std::process::exit(1);
+    }
     // Prepend common install locations to PATH so `nvim`/`herdr` resolve even
     // when herdr launched us with a minimal PATH (e.g. GUI-started on macOS).
     // Must happen before anything spawns a child or a thread.
@@ -81,11 +86,16 @@ fn main() {
         ("app-watch", true) => run(app::watch::app_watch_cmd),
         ("open", true) => run(app::commands::open_cmd),
         ("fs", true) => run(app::tree::fs_cmd),
+        ("app-files", true) => run(app::files::files_cmd),
         ("app-find", true) => run(app::tree::find_cmd),
         ("app-current", true) => run(app::tree::current_cmd),
         ("app-reveal", true) => run(app::tree::reveal_cmd),
         ("app-preview", true) => run(app::sidebar::preview_cmd),
         // The install script runs these before the wrapper exists.
+        #[cfg(windows)]
+        ("app-core-binding", _) => run(app::instance::bind_cmd),
+        #[cfg(windows)]
+        ("app-home-check", true) => run(app::instance::home_check_cmd),
         ("app-setup", _) => run(app::setup::setup_cmd),
         ("app-config", _) => run(app::settings::app_config_cmd),
         ("app-nvim-check", _) => run(nvim_check::check_cmd),

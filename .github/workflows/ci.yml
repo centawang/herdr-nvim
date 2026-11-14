@@ -16,6 +16,11 @@ jobs:
           version: stable
       - uses: extractions/setup-just@v2
       - run: just ci
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: node herdr-app/e2e/js-checks.mjs
+      - run: node herdr-app/e2e/windows-paths.mjs
 
   # Windows uses named pipes instead of filesystem sockets and a different
   # process-detach path, so it needs its own job. Crucially, `cargo test` here
@@ -33,6 +38,17 @@ jobs:
         with:
           neovim: true
           version: stable
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Required Windows tools
+        run: |
+          'cargo','rustc','nvim','git','node','powershell.exe' | ForEach-Object { Get-Command $_ -ErrorAction Stop | Out-Null }
+          nvim --version
+      - run: node herdr-app/e2e/js-checks.mjs
+      - run: node herdr-app/e2e/windows-paths.mjs
+      - run: ./tests/windows-install.ps1 -ParseOnly
+      - run: ./tests/windows-process.ps1 -Snapshot
       - name: cargo fmt --check
         run: cargo fmt --check
       # Runs the whole suite, including the #[cfg(windows)] unit tests
@@ -43,3 +59,5 @@ jobs:
       # Same Lua test surface the Linux job exercises, on Windows nvim.
       - name: lua tests
         run: nvim --headless --noplugin -u NONE -l tests/run.lua
+      - name: Native installer smoke (isolated home, fake app, no UI)
+        run: ./tests/windows-install.ps1 -Binary ./target/debug/herdr-nvim.exe

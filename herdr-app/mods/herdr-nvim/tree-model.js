@@ -4,6 +4,8 @@
 // Paths are absolute; a folder's entries are listed on first open and again
 // when something under the root changes (a folder watch, no polling).
 
+import { dirname, join, normalize, relative, inside } from "./paths.js";
+export { dirname } from "./paths.js";
 import { gitMarks, listFolder } from "./tree.js";
 
 const ROWS = 3000;
@@ -22,10 +24,6 @@ async function each(items, fn) {
   }));
 }
 
-export function dirname(path) {
-  return path.replace(/\/[^/]*$/, "") || "/";
-}
-
 export class TreeModel {
   constructor() {
     this.reset(null);
@@ -35,7 +33,7 @@ export class TreeModel {
 
   reset(root) {
     this.version = (this.version ?? 0) + 1;
-    this.root = root;
+    this.root = root && normalize(root);
     this.marksAt = 0;
     this.entries = new Map(); // folder -> [{name, dir}]
     this.loads = new Map(); // folder -> the latest listing's number
@@ -80,6 +78,7 @@ export class TreeModel {
   // and the caller runs refreshMarks once that time is up.
   async reloadChanged(changed) {
     const root = this.root;
+    changed = changed?.map(normalize);
     if (!changed?.length || changed.includes(root)) {
       await this.reload();
       return { marks: "done" };
@@ -88,11 +87,11 @@ export class TreeModel {
     // inside .git change nothing the tree shows unless ignored files show.
     const unseen = (path) => {
       if (path.includes("/.git/") || path.endsWith("/.git")) return true;
-      if (this.showIgnored || !path.startsWith(`${root}/`)) return false;
+      if (this.showIgnored || !inside(path, root)) return false;
       let folder = root;
-      for (const part of path.slice(root.length + 1).split("/")) {
+      for (const part of relative(path, root).split("/")) {
         if (this.ignored.get(folder)?.has(part)) return true;
-        folder = `${folder}/${part}`;
+        folder = join(folder, part);
       }
       return false;
     };
@@ -128,7 +127,7 @@ export class TreeModel {
     for (const entry of this.entries.get(folder) ?? []) {
       if (out.length >= ROWS) break;
       if (!this.shown(folder, entry)) continue;
-      const abs = `${folder}/${entry.name}`;
+      const abs = join(folder, entry.name);
       out.push({ ...entry, abs, depth, ignored: this.ignored.get(folder)?.has(entry.name) ?? false });
       if (entry.dir && this.open.has(abs)) this.walk(abs, depth + 1, out);
     }
@@ -155,11 +154,12 @@ export class TreeModel {
   // Opens every folder on the way to `abs` (inside the root); true if it can
   // be shown.
   async expandTo(abs) {
-    if (!this.root || !abs.startsWith(`${this.root}/`)) return false;
-    const parts = abs.slice(this.root.length + 1).split("/");
+    abs = normalize(abs);
+    if (!this.root || !inside(abs, this.root) || abs === this.root) return false;
+    const parts = relative(abs, this.root).split("/");
     let folder = this.root;
     for (const part of parts.slice(0, -1)) {
-      folder = `${folder}/${part}`;
+      folder = join(folder, part);
       if (!this.open.has(folder)) {
         this.open.add(folder);
         this.version++;

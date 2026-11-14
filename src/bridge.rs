@@ -222,9 +222,7 @@ pub(crate) fn gather_candidates(
     let mut scraped = extract::extract(scrape_text, cwd, exists);
     for mention in &mut scraped {
         // Already absolute; canonical so it matches the git and mined paths.
-        mention.path = pathkey::canonical(Path::new(&mention.path))
-            .to_string_lossy()
-            .into_owned();
+        mention.path = pathkey::identity(Path::new(&mention.path));
     }
 
     candidates::build_candidates(BuildInput {
@@ -694,6 +692,87 @@ mod tests {
         fn drop(&mut self) {
             let _ = std::fs::remove_dir_all(&self.root);
         }
+    }
+
+    #[test]
+    fn real_gather_fff_merge_keeps_repo_only_hits_and_session_stats() {
+        let repo = Repo::new("fff-空 格");
+        let session = repo.pi_session(&repo.path, &[("edit", "./src/greet.js")]);
+        let candidates = gather_candidates(Some(&session), "src/greet.js:2", &repo.path, &|p| {
+            p.is_file()
+        });
+        let greet: Vec<_> = candidates
+            .iter()
+            .filter(|c| c.path == repo.file("src/greet.js"))
+            .collect();
+        assert_eq!(greet.len(), 1);
+        assert_eq!(greet[0].diff_stat, Some((1, 0)));
+        let cwd = repo.path.to_string_lossy();
+        let displays: Vec<_> = candidates
+            .iter()
+            .map(|c| crate::picker::display_path(&c.path, &cwd, None))
+            .collect();
+        let index = crate::fff::FffIndex::open(&cwd, false).expect("fff index");
+        let hits = crate::picker::compute_matches_fff(&candidates, &displays, "notes", &index);
+        assert!(hits
+            .iter()
+            .any(|hit| candidates[hit.index].path == repo.file("src/notes.md")));
+        assert!(
+            !candidates
+                .iter()
+                .find(|c| c.path == repo.file("src/notes.md"))
+                .unwrap()
+                .session
+        );
+    }
+
+    #[test]
+    fn literal_tilde_git_session_fff_merge_stays_inside_repo() {
+        let repo = Repo::new("literal-tilde");
+        std::fs::create_dir(repo.path.join("~dir")).unwrap();
+        for rel in ["~notes.md", "~dir/a.rs"] {
+            std::fs::write(repo.path.join(rel), "literal repo content").unwrap();
+        }
+        let session = repo.pi_session(&repo.path, &[("read", "./~notes.md")]);
+        let candidates = gather_candidates(Some(&session), "", &repo.path, &|p| p.is_file());
+        let git = crate::gitscan::list_repo_files(&repo.path).unwrap();
+        let cwd = repo.path.to_string_lossy();
+        let displays: Vec<_> = candidates
+            .iter()
+            .map(|c| crate::picker::display_path(&c.path, &cwd, None))
+            .collect();
+        let index = crate::fff::FffIndex::open(&cwd, false).expect("fff index");
+        for (rel, query) in [("~notes.md", "~notes"), ("~dir/a.rs", "a.rs")] {
+            let expected = repo.file(rel);
+            assert!(
+                git.contains(&expected),
+                "Git lost literal repo path {expected}: {git:?}"
+            );
+            assert_eq!(
+                std::fs::read_to_string(&expected).unwrap(),
+                "literal repo content"
+            );
+            assert_eq!(candidates.iter().filter(|c| c.path == expected).count(), 1);
+            assert!(
+                index.search(query).iter().any(|h| h.path == expected),
+                "fff must point inside repo"
+            );
+            let merged = crate::picker::compute_matches_fff(&candidates, &displays, query, &index);
+            assert_eq!(
+                merged
+                    .iter()
+                    .filter(|h| candidates[h.index].path == expected)
+                    .count(),
+                1
+            );
+        }
+        assert!(
+            candidates
+                .iter()
+                .find(|c| c.path == repo.file("~notes.md"))
+                .unwrap()
+                .session
+        );
     }
 
     /// The picker's default view: (path, is_edit, diff_stat, line) per row.

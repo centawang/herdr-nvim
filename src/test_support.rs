@@ -24,10 +24,48 @@ use crate::{
 static ENV_LOCK: Mutex<()> = Mutex::new(());
 static COUNTER: AtomicUsize = AtomicUsize::new(0);
 
-const VARS: [&str; 3] = [
+// Keep the *original* Windows Child handles at spawn time, never reopen a
+// numeric PID. Even an exited process handle still identifies that process.
+// Scoped TestEnv serializes callers and reaps leftover handles after panics.
+#[cfg(windows)]
+static CHILDREN: Mutex<Vec<(PathBuf, std::process::Child)>> = Mutex::new(Vec::new());
+
+#[cfg(windows)]
+pub(crate) fn remember_child(socket: &std::path::Path, child: std::process::Child) {
+    CHILDREN
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .push((socket.to_owned(), child));
+}
+
+#[cfg(windows)]
+fn reap(child: &mut std::process::Child) {
+    // Child::kill on Windows uses the stored process HANDLE, not its PID.
+    let _ = child.kill();
+    let _ = child.wait();
+}
+
+#[cfg(windows)]
+fn kill_owned(socket: Option<&std::path::Path>, pid: u32) {
+    let mut children = CHILDREN.lock().unwrap_or_else(|e| e.into_inner());
+    if let Some(at) = children
+        .iter()
+        .position(|(s, c)| c.id() == pid && socket.is_none_or(|socket| socket == s))
+    {
+        let (_, mut child) = children.swap_remove(at);
+        reap(&mut child);
+    }
+    // No original handle means no ownership; deliberately do nothing.
+}
+
+const VARS: [&str; 7] = [
     "HERDR_NVIM_RUNTIME_DIR",
     "HERDR_NVIM_STATE_DIR",
     "XDG_CONFIG_HOME",
+    "HERDR_NVIM_CONFIG",
+    "HERDR_NVIM_HOST",
+    "HERDR_NVIM_SELF",
+    "HERDR_NVIM_PLUGIN_ROOT",
 ];
 
 /// Points the runtime dir (`<dir>/runtime`, not created up front), the state
@@ -54,6 +92,9 @@ impl TestEnv {
         env::set_var("HERDR_NVIM_RUNTIME_DIR", dir.join("runtime"));
         env::set_var("HERDR_NVIM_STATE_DIR", dir.join("state"));
         env::set_var("XDG_CONFIG_HOME", dir.join("xdg-config"));
+        for var in &VARS[3..] {
+            env::remove_var(var);
+        }
         Self {
             _lock: lock,
             old,
@@ -68,6 +109,10 @@ impl TestEnv {
 
 impl Drop for TestEnv {
     fn drop(&mut self) {
+        #[cfg(windows)]
+        for (_, mut child) in CHILDREN.lock().unwrap_or_else(|e| e.into_inner()).drain(..) {
+            reap(&mut child);
+        }
         for (var, old) in VARS.iter().zip(&self.old) {
             match old {
                 Some(value) => env::set_var(var, value),
@@ -118,9 +163,85 @@ pub(crate) fn kill(pid: u32) {
     #[cfg(not(windows))]
     let _ = Command::new("kill").args(["-9", &pid.to_string()]).output();
     #[cfg(windows)]
-    let _ = Command::new("taskkill")
-        .args(["/F", "/PID", &pid.to_string()])
-        .output();
+    kill_owned(None, pid);
+}
+
+#[cfg(windows)]
+#[test]
+fn teardown_without_an_owned_handle_does_not_kill_a_live_pid() {
+    let _env = TestEnv::new();
+    struct Owned(std::process::Child);
+    impl Drop for Owned {
+        fn drop(&mut self) {
+            let _ = self.0.kill();
+            let _ = self.0.wait();
+        }
+    }
+    let mut unrelated = Owned(
+        Command::new("nvim.exe")
+            .args(["--headless", "--clean", "-i", "NONE"])
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .expect("required nvim.exe"),
+    );
+    assert!(unrelated.0.try_wait().unwrap().is_none());
+    // A stale/mismatched TestDaemon identity must not grant ownership of a PID.
+    let stale = TestDaemon {
+        tab: TabId::new("not-owned"),
+        socket: _env.dir.join("not-owned"),
+        pid: unrelated.0.id(),
+    };
+    drop(stale);
+    assert!(
+        unrelated.0.try_wait().unwrap().is_none(),
+        "teardown killed an unrelated live process without an owned handle"
+    );
+    let socket = _env.dir.join("exited");
+    let mut exited = Command::new("nvim.exe")
+        .args(["--headless", "--clean", "-i", "NONE", "+qa!"])
+        .spawn()
+        .unwrap();
+    let dead_pid = exited.id();
+    exited.wait().unwrap();
+    remember_child(&socket, exited);
+    drop(TestDaemon {
+        tab: TabId::new("exited"),
+        socket,
+        pid: dead_pid,
+    });
+    assert!(CHILDREN.lock().unwrap().is_empty());
+    assert!(
+        unrelated.0.try_wait().unwrap().is_none(),
+        "an exited handle must not affect another process"
+    );
+    let socket = _env.dir.join("owned");
+    let owned = Command::new("nvim.exe")
+        .args(["--headless", "--clean", "-i", "NONE"])
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+        .unwrap();
+    let pid = owned.id();
+    remember_child(&socket, owned);
+    drop(TestDaemon {
+        tab: TabId::new("changed"),
+        socket: _env.dir.join("wrong-socket"),
+        pid,
+    });
+    assert!(
+        CHILDREN.lock().unwrap()[0].1.try_wait().unwrap().is_none(),
+        "changed socket identity must not terminate the owned child"
+    );
+    drop(TestDaemon {
+        tab: TabId::new("owned"),
+        socket,
+        pid,
+    });
+    assert!(CHILDREN.lock().unwrap().is_empty());
+    assert!(unrelated.0.try_wait().unwrap().is_none());
 }
 
 /// nvim stops its jobs on exit, but asynchronously; give it a moment.
@@ -133,8 +254,9 @@ pub(crate) fn wait_dead(pid: u32) {
     }
 }
 
-/// A real daemon spawned for a test tab, with the pid it reported. Killed on
-/// drop (after a polite quit), so a failing assertion never leaks a process.
+/// A real daemon spawned for a test tab, with the pid it reported. Windows
+/// teardown requires its original Child handle in CHILDREN, never PID lookup;
+/// TestEnv also reaps retained handles if startup/assertions fail.
 pub(crate) struct TestDaemon {
     pub(crate) tab: TabId,
     pub(crate) socket: PathBuf,
@@ -248,6 +370,9 @@ impl TestDaemon {
 
 impl Drop for TestDaemon {
     fn drop(&mut self) {
+        #[cfg(windows)]
+        kill_owned(Some(&self.socket), self.pid);
+        #[cfg(not(windows))]
         if process_alive(self.pid) {
             kill(self.pid);
         }

@@ -10,6 +10,7 @@ import { v_flex, h_flex, Scrollbar, VirtualListScrollHandle, v_virtual_list } fr
 import { focused, layout, nextCommand, notify, panes, readTextFile, run, setShared, shared, spaces, theme, watchFolder } from "herdr";
 import { previewKind } from "./preview.js";
 import { nvim } from "./lib.js";
+import { wire, normalize, same, join, relative, basename } from "./paths.js";
 import { current, findFiles, fsOp, inside, request, systemOpen, tabOf } from "./ops.js";
 import { openDialog } from "./dialog.js";
 import { openKeyHelp } from "./keys-help.js";
@@ -35,7 +36,7 @@ function place(previous) {
   const space = spaces().find((s) => s.id === f?.space) ?? spaces().find((s) => s.active);
   const pane = f?.pane ? panes().find((p) => p.pane === f.pane) : null;
   const cwd = pane?.cwd || (f?.tab === previous?.tab ? previous?.cwd : null) || f?.cwd || space?.folder || null;
-  return { space: space?.id ?? null, tab: f?.tab ?? null, cwd, machine: space?.machine ?? null };
+  return { space: space?.id ?? null, tab: f?.tab ?? null, cwd: wire(cwd), machine: space?.machine ?? null };
 }
 
 export class Tree {
@@ -104,6 +105,7 @@ export class Tree {
   // The tab's folder is `tabRoot`: show the root chosen for this tab, unless
   // the tab's folder changed since (then the folder itself).
   adopt(tab, tabRoot, cx) {
+    tabRoot = normalize(tabRoot);
     if (this.rootTab !== tab || (this.shownTab === tab && this.tabRoot === tabRoot)) return;
     this.shownTab = tab;
     this.tabRoot = tabRoot;
@@ -126,6 +128,7 @@ export class Tree {
   // next setRoot (`rootGen`); the same root again (two tabs on one repo, or
   // back to a tab) keeps the loop, the listing and the selection.
   setRoot(root, cx) {
+    root = root && normalize(root);
     if (this.rootTab && root) this.roots.remember(this.rootTab, this.tabRoot, root);
     if (root && root === this.model.root && !this.error) return;
     const gen = (this.rootGen = (this.rootGen ?? 0) + 1);
@@ -202,7 +205,7 @@ export class Tree {
         const changed = await watchFolder(dirname(watch));
         if (this.currentGen !== gen) return;
         // Its own file, or the temp file nvim renames over it.
-        if (changed.length && !changed.some((p) => p.startsWith(watch) || p === dirname(watch))) continue;
+        if (changed.length && !changed.some((p) => same(p, watch) || same(p, `${watch}.tmp`) || same(p, dirname(watch)))) continue;
         const now = await this.nvimState();
         if (now.file && now.file !== seen.file) await this.reveal(now.file, cx);
         // nvim took the keyboard, maybe: draw the focus again (a file
@@ -220,7 +223,10 @@ export class Tree {
     // answer for this tab.
     const ours = this.watching && this.watchingTab === this.place?.tab;
     const text = ours ? await readTextFile(this.watching).catch(() => null) : null;
-    try { return (text && JSON.parse(text)) || {}; } catch { return {}; }
+    try {
+      const state = (text && JSON.parse(text)) || {};
+      return { ...state, file: wire(state.file), cwd: wire(state.cwd) };
+    } catch { return {}; }
   }
 
   // What the tab's nvim wrote on its last FocusGained.
@@ -251,6 +257,7 @@ export class Tree {
   // with `reload`); if it isn't listed yet (just created), render selects it
   // once it is. The latest reveal wins, whichever finishes first.
   async reveal(path, cx, reload = false) {
+    path = path && normalize(path);
     if (!path || !inside(path, this.model.root ?? "")) return;
     const seq = (this.revealSeq = (this.revealSeq ?? 0) + 1);
     if (reload) await this.model.reload().catch(() => {});
@@ -262,7 +269,7 @@ export class Tree {
   }
 
   rows() {
-    if (this.filter) return this.filter.results.map((rel) => ({ name: rel, abs: `${this.filter.root}/${rel}`, dir: false, depth: 0 }));
+    if (this.filter) return this.filter.results.map((rel) => ({ name: rel, abs: join(this.filter.root, rel), dir: false, depth: 0 }));
     return this.model.rows();
   }
 
@@ -315,7 +322,7 @@ export class Tree {
   }
 
   action(name, row, cx) {
-    const rel = (path) => path.slice(this.model.root.length + 1);
+    const rel = (path) => relative(path, this.model.root) ?? path;
     switch (name) {
       case "add":
         return this.dialog({ kind: "input", title: "New file or folder", hint: `In ${rel(this.dirOf(row)) || "."}/ — end with / for a folder`,
@@ -520,22 +527,22 @@ export class Tree {
     const crumbs = [];
     if (root && home && root !== home) {
       if (inside(root, home)) {
-        crumbs.push(crumb("crumb-home", home.split("/").pop(), home, false));
+        crumbs.push(crumb("crumb-home", basename(home), home, false));
         let path = home;
-        for (const part of root.slice(home.length + 1).split("/")) {
-          path = `${path}/${part}`;
+        for (const part of relative(root, home).split("/")) {
+          path = join(path, part);
           crumbs.push(div().flex_none().text_size(12).text_color(t.dim).child("/"));
           crumbs.push(crumb(`crumb-${path}`, part, path, path === root));
         }
       } else {
         crumbs.push(crumb("crumb-root", root, root, true));
-        crumbs.push(crumb("crumb-home", `↩ ${home.split("/").pop()}`, home, false));
+        crumbs.push(crumb("crumb-home", `↩ ${basename(home)}`, home, false));
       }
     }
     return h_flex().h(42).flex_none().px(14).gap(6).items_center().border_b(1).border_color(t.border)
       .child(div().flex_none().font_semibold().child("Files"))
       .child(h_flex().id("crumbs").flex_1().min_w(0).gap(4).items_center().overflow_hidden()
-        .when(!crumbs.length, (el) => el.child(div().truncate().text_size(12).text_color(t.dim).child(root?.split("/").pop() ?? "")))
+        .when(!crumbs.length, (el) => el.child(div().truncate().text_size(12).text_color(t.dim).child(root ? basename(root) : "")))
         .children(crumbs))
       .when(this.busy, (el) => el.child(svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.muted).spin(900)))
       .child(badge(this.model.showHidden, "H")).child(badge(this.model.showIgnored, "I"));

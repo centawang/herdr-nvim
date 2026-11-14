@@ -94,7 +94,10 @@ pub fn fuzzy_match(hay: &str, needle: &str) -> Option<(i32, Vec<(usize, usize)>)
     }
     let hay_chars: Vec<(usize, char)> = hay.char_indices().collect();
     let needle_lower: Vec<char> = needle.chars().flat_map(|c| c.to_lowercase()).collect();
-    let name_start = hay.rfind('/').map(|i| i + 1).unwrap_or(0);
+    let name_start = hay
+        .rfind(|c| c == '/' || (cfg!(windows) && c == '\\'))
+        .map(|i| i + 1)
+        .unwrap_or(0);
 
     let mut ni = 0usize;
     let mut score = 0i32;
@@ -120,7 +123,8 @@ pub fn fuzzy_match(hay: &str, needle: &str) -> Option<(i32, Vec<(usize, usize)>)
             || matches!(
                 hay[..byte].chars().next_back(),
                 Some('/' | '_' | '-' | '.' | ' ')
-            );
+            )
+            || (cfg!(windows) && hay[..byte].ends_with('\\'));
         if boundary {
             score += 10;
         }
@@ -149,6 +153,18 @@ pub fn fuzzy_match(hay: &str, needle: &str) -> Option<(i32, Vec<(usize, usize)>)
 /// `~`-shortened if inside `home`, else absolute. No width handling -- the
 /// renderer ellipsizes the directory prefix to fit. Pure, unit tested.
 pub fn display_path(path: &str, cwd: &str, home: Option<&str>) -> String {
+    #[cfg(windows)]
+    {
+        let path = crate::pathkey::wire(std::path::Path::new(path));
+        let cwd = crate::pathkey::wire(std::path::Path::new(cwd));
+        let home = home.map(|h| crate::pathkey::wire(std::path::Path::new(h)));
+        display_path_inner(&path, &cwd, home.as_deref())
+    }
+    #[cfg(not(windows))]
+    display_path_inner(path, cwd, home)
+}
+
+fn display_path_inner(path: &str, cwd: &str, home: Option<&str>) -> String {
     if let Some(rest) = strip_dir_prefix(path, cwd) {
         rest.to_owned()
     } else if let Some(rest) = home.and_then(|h| strip_dir_prefix(path, h)) {
@@ -163,8 +179,8 @@ pub fn display_path(path: &str, cwd: &str, home: Option<&str>) -> String {
 /// Windows path (`F:\repo\src\main.rs`) shortens against a cwd/home that
 /// herdr reports with backslashes just like a POSIX one does with `/`.
 fn strip_dir_prefix<'a>(path: &'a str, dir: &str) -> Option<&'a str> {
-    let rest = path.strip_prefix(dir)?;
-    rest.strip_prefix('/').or_else(|| rest.strip_prefix('\\'))
+    let rest = path.strip_prefix(dir.trim_end_matches('/'))?;
+    rest.strip_prefix('/')
 }
 
 /// Shorten a directory `prefix` (the part before the filename) to at most
@@ -254,19 +270,19 @@ pub fn merge_fff_tier(
 ) -> Vec<FilterMatch> {
     use std::collections::{HashMap, HashSet};
 
-    let by_path: HashMap<&str, usize> = cands
+    let by_path: HashMap<String, usize> = cands
         .iter()
         .enumerate()
-        .map(|(i, c)| (c.path.as_str(), i))
+        .map(|(i, c)| (crate::pathkey::key(&c.path), i))
         .collect();
-    let taken: HashSet<usize> = session.iter().map(|m| m.index).collect();
+    let mut taken: HashSet<usize> = session.iter().map(|m| m.index).collect();
 
     let mut out = session;
     for hit in fff_hits {
-        let Some(&index) = by_path.get(hit.path.as_str()) else {
+        let Some(&index) = by_path.get(&crate::pathkey::key(&hit.path)) else {
             continue;
         };
-        if taken.contains(&index) {
+        if !taken.insert(index) {
             continue;
         }
         let display = &displays[index];
@@ -925,20 +941,21 @@ mod tests {
         );
     }
 
+    #[cfg(windows)]
     #[test]
     fn display_path_accepts_backslash_separators() {
         assert_eq!(
             display_path(r"F:\repo\src\main.rs", r"F:\repo", Some(r"C:\Users\u")),
-            r"src\main.rs"
+            "src/main.rs"
         );
         assert_eq!(
             display_path(r"C:\Users\u\AppData\x.py", r"F:\repo", Some(r"C:\Users\u")),
-            r"~/AppData\x.py"
+            "~/AppData/x.py"
         );
         // `F:\repo2\...` is not inside `F:\repo`.
         assert_eq!(
             display_path(r"F:\repo2\a.rs", r"F:\repo", None),
-            r"F:\repo2\a.rs"
+            "F:/repo2/a.rs"
         );
     }
 
@@ -1016,6 +1033,19 @@ mod tests {
             path: path.into(),
             highlights,
         }
+    }
+
+    #[test]
+    fn duplicate_fff_identities_make_one_row() {
+        let cands = vec![repo_cand("/r/a.rs")];
+        let displays = displays_of(&cands, "/r");
+        let merged = merge_fff_tier(
+            &cands,
+            &displays,
+            Vec::new(),
+            vec![hit("/r/a.rs", vec![]), hit("/r/a.rs", vec![])],
+        );
+        assert_eq!(merged.len(), 1);
     }
 
     #[test]
@@ -1102,27 +1132,24 @@ mod tests {
     #[test]
     fn fff_end_to_end_over_this_repo() {
         let cwd = env!("CARGO_MANIFEST_DIR").to_owned();
-        let out = std::process::Command::new("git")
-            .arg("-C")
-            .arg(&cwd)
-            .arg("ls-files")
-            .output()
-            .expect("git ls-files");
-        // Session tier: picker.rs itself. Repo tier: everything tracked.
-        let mut cands = vec![cand(&format!("{cwd}/src/picker.rs"))];
-        for line in String::from_utf8_lossy(&out.stdout).lines() {
-            let abs = format!("{cwd}/{line}");
-            if abs != cands[0].path {
-                cands.push(repo_cand(&abs));
-            }
-        }
+        // Real gather -> git/session -> fff -> merge, not synthetic slash paths.
+        let cands = crate::bridge::gather_candidates(
+            None,
+            "src/picker.rs",
+            std::path::Path::new(&cwd),
+            &|p| p.is_file(),
+        );
+        let picker = cands
+            .iter()
+            .position(|c| c.path.ends_with("picker.rs"))
+            .unwrap();
         let displays = displays_of(&cands, &cwd);
-        let fff = FffIndex::open(&cwd, true).expect("fff index should open");
+        let fff = FffIndex::open(&cwd, false).expect("fff index should open");
 
         let matches = compute_matches_fff(&cands, &displays, "picker", &fff);
         assert!(!matches.is_empty(), "fff found nothing for 'picker'");
         assert_eq!(
-            matches[0].index, 0,
+            matches[0].index, picker,
             "agent-touched src/picker.rs must rank first"
         );
         let mut seen = std::collections::HashSet::new();

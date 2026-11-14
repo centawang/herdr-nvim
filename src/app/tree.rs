@@ -65,15 +65,20 @@ pub fn find_cmd() -> Result<()> {
     let query = cli::flag(&args, "--query")?.unwrap_or_default();
     let index = crate::fff::FffIndex::open(root, config::load().picker.frecency)
         .context("cannot index that folder")?;
-    let prefix = format!("{}/", root.trim_end_matches('/'));
+    let root = crate::pathkey::canonical(std::path::Path::new(root));
     let hits: Vec<String> = index
         .search(query)
         .into_iter()
         .map(|hit| {
-            hit.path
-                .strip_prefix(&prefix)
-                .unwrap_or(&hit.path)
-                .to_owned()
+            let path = std::path::Path::new(&hit.path);
+            let rel = path
+                .strip_prefix(&root)
+                .unwrap_or(path)
+                .to_string_lossy()
+                .into_owned();
+            #[cfg(windows)]
+            let rel = rel.replace('\\', "/");
+            rel
         })
         .collect();
     println!("{}", json!({ "paths": hits }));
@@ -104,7 +109,17 @@ pub fn current_cmd() -> Result<()> {
     // What the tab's nvim last wrote (`app.lua` `write_state`); an nvim that
     // hasn't written yet is asked, once. A stopped nvim's file is not the
     // tab's: its folder may be one the tab no longer works in.
-    let running = daemon::registry::socket_path(&ctx.tab).exists();
+    let socket = daemon::registry::socket_path(&ctx.tab);
+    #[cfg(unix)]
+    let running = socket.exists();
+    #[cfg(windows)]
+    let running = daemon::remote_expr_within(
+        &socket,
+        "1",
+        &config::load().sidebar,
+        Duration::from_secs(2),
+    )
+    .is_some();
     let state: Value = running
         .then(|| std::fs::read_to_string(&watch).ok())
         .flatten()
@@ -138,7 +153,7 @@ pub fn current_cmd() -> Result<()> {
     let tab_root = real("cwd").unwrap_or_else(real_root);
     println!(
         "{}",
-        json!({"file": file, "watch": watch, "tab_root": tab_root})
+        json!({"file": file.as_deref().map(crate::pathkey::wire), "watch": crate::pathkey::wire(&watch), "tab_root": crate::pathkey::wire(&tab_root)})
     );
     Ok(())
 }

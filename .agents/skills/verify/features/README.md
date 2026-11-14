@@ -33,6 +33,10 @@ This is a behavior-level list of what herdr-nvim does for a user: an nvim sideba
 
 - [journeys](journeys.md): The review loop across features: agent edit, picker, comment, submit, agent reply.
 
+## Native Windows
+
+- [windows](windows.md): Native x64 installation, pipe safety, drive/UNC IO and isolated Windows acceptance. Unix boxes and Node mocks are not Windows UI proof.
+
 ## Ops
 
 - [ops](ops.md): `herdr-nvim doctor`, `herdr-nvim daemons`, install and build.

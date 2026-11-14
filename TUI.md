@@ -32,11 +32,27 @@ https://github.com/user-attachments/assets/9a6092b4-6851-4e47-a4b7-d09fda1f5121
 
 ## Requirements
 
-nvim ≥ 0.10 · herdr ≥ 0.7.5.
+nvim ≥ 0.10 · herdr ≥ 0.7.5 (existing Unix baseline). Native Windows x64 also
+requires Git, PowerShell and a Herdr build with Windows plugin support. See
+[WINDOWS.md](WINDOWS.md) for native dependencies and validation boundaries.
 
 ## Install
 
-One command installs it; run it again to upgrade:
+On Windows, use native PowerShell (no WSL/Git Bash):
+
+```powershell
+herdr plugin install ChmaraX/herdr-nvim
+# Development checkout, existing Rust/MSVC tools only:
+.\herdr\install.ps1 -Source
+```
+
+The manifest hook uses the exact-version prebuilt and SHA-256, probing it before
+replacement. If that Windows asset is not yet published, use explicit source mode.
+`vswhere` or an existing developer environment supplies MSVC; custom profiles,
+targets and `CARGO_TARGET_DIR` are respected. Windows key transport/ConPTY still
+needs native verification, not the Linux box. [Details and tests](WINDOWS.md).
+
+On macOS/Linux, one command installs it; run it again to upgrade:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ChmaraX/herdr-nvim/main/install.sh | sh -s -- --tui
@@ -83,8 +99,10 @@ daemon that survives the toggle. Two tabs can show two different files in two
 sidebars. When you close and reopen a sidebar, it loses nothing.
 
 A daemon lives as long as its tab. Closing the tab (or its whole workspace)
-stops that nvim right away, along with its LSP servers; unsaved buffers in it
-are discarded. Daemons survive a herdr restart, so restored tabs reattach to
+asks that nvim to quit; unsaved buffers in it are discarded. Unix also force-stops
+hung daemons and their process groups. Windows cannot safely force-kill a hung
+or unquittable daemon automatically: it reports an actionable error and keeps
+its marker/state. Save/quit it manually rather than killing every nvim.exe. Daemons survive a herdr restart, so restored tabs reattach to
 their nvim; any whose tab did not come back are reaped when herdr starts.
 
 To see which tab each hidden nvim belongs to and how much memory it (with its

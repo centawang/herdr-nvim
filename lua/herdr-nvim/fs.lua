@@ -15,16 +15,24 @@ local function snacks()
   return ok and type(s) == "table" and s.rename and s or nil
 end
 
+local function wire(path)
+  return vim.fs.normalize(path)
+end
 local function norm(path)
-  return vim.fs.normalize(vim.fn.fnamemodify(path, ":p")):gsub("/$", "")
+  local p = wire(vim.fn.fnamemodify(path, ":p"))
+  if p == "/" or p:match("^%a:/$") then return p end
+  return p:gsub("/$", "")
 end
-
 local function exists(path)
-  return uv.fs_stat(path) ~= nil
+  return uv.fs_lstat(path) ~= nil
 end
-
 local function under(path, dir)
-  return path == dir or path:sub(1, #dir + 1) == dir .. "/"
+  path, dir = wire(path), wire(dir)
+  local prefix = dir:gsub("/$", "") .. "/"
+  return path == dir or path:sub(1, #prefix) == prefix
+end
+local function joined(dir, tail)
+  return wire(dir):gsub("/$", "") .. "/" .. tail
 end
 
 -- Where `path` really is, symlinks resolved: a folder all the way, else its
@@ -36,15 +44,15 @@ local function real(path)
   local stat = uv.fs_lstat(path)
   if stat and stat.type == "link" then
     local dir = uv.fs_realpath(vim.fs.dirname(path)) or vim.fs.dirname(path)
-    return (dir .. "/" .. vim.fs.basename(path)):gsub("//+", "/")
+    return joined(dir, vim.fs.basename(path))
   end
-  if vim.fn.isdirectory(path) == 1 then return uv.fs_realpath(path) or path end
+  if vim.fn.isdirectory(path) == 1 then return wire(uv.fs_realpath(path) or path) end
   local dir, rest = vim.fs.dirname(path), { vim.fs.basename(path) }
   while not uv.fs_realpath(dir) and dir ~= vim.fs.dirname(dir) do
     table.insert(rest, 1, vim.fs.basename(dir))
     dir = vim.fs.dirname(dir)
   end
-  return ((uv.fs_realpath(dir) or dir) .. "/" .. table.concat(rest, "/")):gsub("//+", "/")
+  return joined(uv.fs_realpath(dir) or dir, table.concat(rest, "/"))
 end
 
 -- Every path inside the root, as the file system resolves them (a symlink in
@@ -129,15 +137,51 @@ local function lsp_rename(from, to, rename)
   end
 end
 
+-- Preflight the entire copy before writing. Never follow symlinks/junctions
+-- or copy a folder into itself; those can escape the approved root or recurse.
+-- Explicitly bounded work. This applies even when Snacks is installed.
 local function copy_path(from, to)
-  local s = snacks()
-  if s then
-    require("snacks.picker.util").copy_path(from, to)
-  else
-    local out = vim.fn.system({ "cp", "-R", from, to })
-    if vim.v.shell_error ~= 0 then error(out) end
+  if under(real(to), real(from)) then error("cannot copy a folder into itself") end
+  local plan = {}
+  local function scan(src, dst, depth)
+    if depth > 64 or #plan >= 10000 then error("copy is too large (10000 entries / 64 levels)") end
+    local stat = assert(uv.fs_lstat(src))
+    if stat.type ~= "file" and stat.type ~= "directory" then error("copy refuses symlinks, junctions and special files: " .. src) end
+    -- Only ordinary rwx bits, never propagate setuid/setgid/sticky bits.
+    table.insert(plan, { src, dst, stat.type, stat.mode % 512 })
+    if stat.type == "directory" then
+      local handle = assert(uv.fs_scandir(src))
+      while true do
+        local name = uv.fs_scandir_next(handle)
+        if not name then break end
+        scan(joined(src, name), joined(dst, name), depth + 1)
+      end
+    end
   end
-  if not exists(to) then error("could not copy to " .. to) end
+  scan(from, to, 0)
+  vim.fn.mkdir(vim.fs.dirname(to), "p")
+  local made = {}
+  local ok, err = pcall(function()
+    for _, item in ipairs(plan) do
+      -- Recheck links immediately before IO. Like normal editor operations this
+      -- is not a sandbox against concurrent hostile filesystem changes.
+      if assert(uv.fs_lstat(item[1])).type ~= item[3] then error("source changed during copy") end
+      if item[3] == "directory" then
+        assert(uv.fs_mkdir(item[2], 448)) -- 0700 while constructing, even under umask 022
+        table.insert(made, item)
+      else assert(uv.fs_copyfile(item[1], item[2], { excl = true })) end
+    end
+  end)
+  -- Children first: restoring a read-only parent early would prevent finishing.
+  -- Do this on failure too. Any failed chmod leaves owner-only construction
+  -- permissions, never a newly group/world-readable private directory.
+  if vim.fn.has("win32") == 0 then
+    for i = #made, 1, -1 do
+      local applied, why = uv.fs_chmod(made[i][2], made[i][4])
+      if not applied then ok, err = false, why end
+    end
+  end
+  if not ok then error(err) end
 end
 
 local ops = {}
@@ -251,6 +295,7 @@ function ops.paste(req)
   for _, from in ipairs(files) do
     local to = dir .. "/" .. vim.fn.fnamemodify(from, ":t")
     if exists(to) then error("already exists: " .. to) end
+    check_inside(req, from, to)
     copy_path(norm(from), to)
     table.insert(pasted, to)
   end

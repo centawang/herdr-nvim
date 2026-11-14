@@ -58,7 +58,7 @@ pub fn app_watch_cmd() -> Result<()> {
     if reconcile()? == 0 {
         return Ok(());
     }
-    let mut events = rpc::hc()
+    let mut events = rpc::hc()?
         .args(["events", "--json"])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -86,11 +86,16 @@ pub fn app_watch_cmd() -> Result<()> {
 /// terminals, so a second start is refused by herdr-core: no lock needed.
 pub(crate) fn ensure_running() {
     let Ok(me) = cli::self_command() else { return };
+    let name = NAME.to_owned();
+    #[cfg(windows)]
+    let name = std::env::var("HERDR_NVIM_INSTANCE")
+        .map(|id| format!("{NAME}-{id}"))
+        .unwrap_or(name);
     let _ = rpc::call(
         "terminal.run",
         json!({
             "argv": [me.to_string_lossy(), "app-watch"],
-            "name": NAME,
+            "name": name,
             "no_parent": true,
             "rm": true,
         }),

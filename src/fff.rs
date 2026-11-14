@@ -118,7 +118,7 @@ impl FffIndex {
             .map(|(item, offsets)| {
                 let rel = item.relative_path(picker);
                 FffHit {
-                    path: format!("{}/{rel}", self.cwd.trim_end_matches('/')),
+                    path: crate::pathkey::literal(&rel, Path::new(&self.cwd)),
                     highlights: offsets
                         .iter()
                         .map(|&(s, e)| (s as usize, e as usize))

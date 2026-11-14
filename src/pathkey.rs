@@ -14,9 +14,47 @@ use std::path::{Component, Path, PathBuf};
 /// `path` as the agent wrote it, made [`absolute`] against `cwd`, then
 /// [`canonical`].
 pub(crate) fn resolve(path: &str, cwd: &Path) -> String {
-    canonical(&absolute(path, cwd))
-        .to_string_lossy()
-        .into_owned()
+    identity(&absolute(path, cwd))
+}
+
+/// A machine-produced relative name (Git/fff/filesystem), never user input.
+/// Join literally before canonicalizing: `~notes.md` belongs inside `root`.
+pub(crate) fn literal(path: &str, root: &Path) -> String {
+    identity(&root.join(path))
+}
+
+/// Filesystem identity, not display: canonicalize existing names (including case),
+/// normalize separators only on Windows. Do not lowercase: Windows can also have
+/// case-sensitive directories, and Unix backslashes are legal filename bytes.
+pub(crate) fn identity(path: &Path) -> String {
+    let path = canonical(path).to_string_lossy().into_owned();
+    #[cfg(windows)]
+    let path = path.replace('/', "\\");
+    path
+}
+
+/// Cheap comparison at hot merge boundaries. Inputs have already gone through
+/// `resolve`/`identity`; do not re-stat the whole repo on every keystroke.
+pub(crate) fn key(path: &str) -> String {
+    #[cfg(windows)]
+    return without_verbatim_prefix(path)
+        .unwrap_or_else(|| path.to_owned())
+        .replace('/', "\\");
+    #[cfg(not(windows))]
+    path.to_owned()
+}
+
+/// The app's wire format uses forward slashes on Windows, without verbatim
+/// prefixes. UNC retains both leading slashes; Unix names are untouched.
+pub(crate) fn wire(path: &Path) -> String {
+    // Lexical only: a protocol conversion must not contact a UNC server.
+    // Producers resolve real paths when IO is actually required.
+    let path = path.to_string_lossy().into_owned();
+    #[cfg(windows)]
+    let path = without_verbatim_prefix(&path)
+        .unwrap_or(path)
+        .replace('\\', "/");
+    path
 }
 
 /// `path` made absolute against `cwd` (`~` expanded) and lexically
@@ -79,6 +117,32 @@ fn without_verbatim_prefix(path: &str) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_backslashes_and_case_are_not_windows_separators() {
+        assert_eq!(
+            identity(Path::new(r"/not-existing/Legal\Name")),
+            r"/not-existing/Legal\Name"
+        );
+        assert_ne!(
+            identity(Path::new("/not-existing/Case")),
+            identity(Path::new("/not-existing/case"))
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_mixed_separators_have_one_identity() {
+        assert_eq!(
+            identity(Path::new(r"C:\not-existing\空 格\a.rs")),
+            identity(Path::new("C:/not-existing/空 格/a.rs"))
+        );
+        assert_eq!(
+            wire(Path::new(r"\\server\share\a.rs")),
+            "//server/share/a.rs"
+        );
+    }
 
     #[test]
     fn drops_the_verbatim_prefix_from_drive_and_unc_paths() {

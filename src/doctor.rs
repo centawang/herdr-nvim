@@ -35,6 +35,12 @@ use crate::{
 
 const WORKSPACE_LABEL: &str = "herdr-nvim-doctor";
 
+#[cfg(windows)]
+pub fn doctor_cmd() -> Result<()> {
+    anyhow::bail!("doctor's pane injection/cleanup is Unix-only. On Windows run the isolated tests in WINDOWS.md; no panes or daemons were changed")
+}
+
+#[cfg(unix)]
 pub fn doctor_cmd() -> Result<()> {
     let with_agent = parse_with_agent(env::args());
     let config = crate::config::load();

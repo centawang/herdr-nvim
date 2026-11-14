@@ -1,13 +1,14 @@
 // herdr-nvim's mod helpers.
 
 import { appHome, exec, focused, notify } from "herdr";
+import { entry } from "./runtime.js";
 import { openCard } from "./card.js";
 
 // The install script writes the wrapper here (it bakes in the binary, the
 // herdr-app path and this window's home). Other mods use it the same way:
 // `<appHome>/mods/herdr-nvim/bin/herdr-nvim open --tab <tab> <file>:<line>`.
 export function bin() {
-  return `${appHome()}/mods/herdr-nvim/bin/herdr-nvim`;
+  return entry ?? `${appHome()}/mods/herdr-nvim/bin/herdr-nvim`;
 }
 
 // The focused tab as `herdr-nvim --ctx` takes it (parsed), or null without

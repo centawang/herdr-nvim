@@ -32,8 +32,9 @@
 //! - Unknown tab, bad arguments, empty registry. Covered:
 //!   `empty_listing_in_text_and_json`,
 //!   `stopping_an_unknown_tab_or_bad_arguments_fail`.
-//! - Not covered on Windows: the fake herdr is a shell script, and
-//!   `Command::new("herdr")` only resolves `.exe` there.
+//! - The lifecycle/GC cases below remain Unix-only (ps/signals/force-kill).
+//!   Windows uses a compiled native fake herdr for the portable CLI cases;
+//!   tests/on_event_cli.rs covers real Windows pipe close/refusal behavior.
 //!
 //! The E2E tests write their steps to `target/test-artifacts/<test>/log.md`.
 

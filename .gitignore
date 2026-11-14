@@ -1,4 +1,5 @@
 .pi-subagents/
+/.squad/
 idea.md
 docs/
 !docs/assets/

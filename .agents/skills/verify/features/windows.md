@@ -1,0 +1,35 @@
+# Native Windows acceptance
+
+## Sub-features
+
+- Shared/TUI and desktop x64 paths, exact-version SHA-256 assets and native entry sidecars.
+- Per-user/runtime/host/app-core-instance pipes and registry/state, pinned core selectors, serialized startup, legacy refusal and non-destructive unknown liveness.
+- Drive/UNC/current-file/watch identity, bounded native listing/preview, libuv copy and outside confirmation.
+- Staged two-mod install, rollback, locked-exe upgrade, ownership and unsaved/comment preservation.
+
+## How to get to it (user POV)
+
+Follow [WINDOWS.md](../../../../WINDOWS.md) in native x64 PowerShell, with manually installed Neovim and Herdr/hc. Use Files or explicitly configured actions; do not assume macOS cmd keys map to Windows.
+
+## Driving it in the box
+
+There is no Windows box/UI harness. Read the verify skill before real UI work. Use an isolated app home/core session, record OS, Herdr/hc, Neovim, Rust and agent versions. Never invoke the installer against the real user home for tests.
+
+Repository checks: cargo fmt/test, headless Lua, both Node scripts, `node herdr-app/e2e/native-protocol.mjs target/debug/herdr-nvim.exe`, tests/windows-install.ps1 (-ParseOnly, -FixtureOnly, then -Binary), tests/windows-process.ps1 -Snapshot. Required tools must fail fast in CI. The fixture installer compiles private .NET stand-ins, not real app instances. `-Binary` now includes the real native protocol suite; it requires existing Rust/Neovim/Git/Node.
+
+Native manual scenarios still required: two tabs with the same keys in separate runtime/host scopes; concurrent/slow startup; unsaved buffers/comments; busy and swallowed-qa stop reports kept; old marker upgrade does not abandon work; picker session+git+fff on Chinese/space paths; drive-root up and UNC not becoming local; tree operations and preview/source; rename undo/LSP; external changes watch; pi comment/ref paste without unintended submit; reopen/upgrade with locked runtime.
+
+## Gotchas
+
+- Production Windows process force-kill is deliberately unsupported. Tests must use fixture-owned Child handles, never a global nvim name or bare PID. Windows unit TestDaemon now retains the original spawn handles (including cleanup after assertion failure); unknown/mismatched PID or socket never opens a new OS handle. A fixture verifies an unowned live PID survives teardown and an exited owned handle does not affect another process. Unix signal cleanup is unchanged.
+- `cargo test --locked --test windows_app_safety` tests real private nvim plus core/app stand-ins (not UI): B reconcile/uninstall preserves A's dirty work, upgrades reuse A, caller HC_SESSION is pinned, restored-home uninstall is refused before stop/setup. Windows Lua 116/116 covers construction-mode request and partial failure, not Unix actual permissions. Unix mode assertions remain pending.
+- Correctness revision: real Git listing -> TreeModel hide/event filtering, no-match/non-repo/error cases, literal tilde Git/session/fff/app-find and 499 long-name NUL streams pass. JS exact Unix Windows-looking names pass through row/open/copy/delete/git/find contracts; not Unix filesystem execution. Native sidecar text/image cache plus APP_BIN stand-in -> real nvim plugin/SELF context pass with entry/selector inheritance cleared and sh/cat/cp absent; configure-disabled control fails. Independent review remains required.
+- Latest isolated Windows baseline: fmt/no-run passed, full Rust 250+3+3+1+2 = 259 passed (four repeated namespace checks), 0 failed/ignored; Lua 116/116; both Node suites, native protocol five groups and PS parse/fixture/real-Binary passed. WSL had no distributions, existing Docker Linux engine unavailable; no Unix/UI/CI/release execution. Dedicated old unmarked-listener and root ZIP traversal negative fixtures remain pending.
+- Binding-edge regressions use native entry/installer and Child-owned dirty nvims: ordinal HC_SESSION A→a, HC_SOCKET/path case drift rejected before staging; real directory identity survives rename, distinguishes replacement homes and accepts ordinary case aliases; wrong-home checks happen before app/core calls. The OS denied `fsutil setCaseSensitiveInfo` on a private fixture (`0x00000005`, misleading exit 0); actual case-sensitive two-home branch is NOT RUN, not a pass. No elevation/system feature change was attempted.
+- Binding format v3 persists Rust's installation-time Win32 volume + 128-bit directory ID in `core.app_home_identity`; early configure checks the recorded path against it, scope uses that verified record, and `app-home-check` compares the selected target to the record. The original unchanged entry/sidecar/digest is tested during A→M plus new A restore: current/stop/fs/setup and actual installer upgrade/uninstall reject with no app/core calls, no replacement daemon, unchanged snapshots/dirty Child/comment/marker/state. Restoring the original directory at A restores that same entry. Ordinary aliases and same-binding runtime reuse remain valid; no automatic relocation/rebinding. Legacy v1/v2 and missing/invalid identity are rejected by entry and installed/candidate guards, never backfilled or auto-migrated. Fresh and upgrade candidate admission reject old/unknown/missing/invalid schema before staging; native fixture positives still cover current fresh/upgrade. Rust/PS/fixtures share `herdr-app/binding-schema.json`, shipped in the bundle. Links or unavailable directory IDs fail closed. Runtime requires captured XDG_RUNTIME_DIR/TMP/TEMP, state requires XDG_STATE_HOME/HOME/USERPROFILE; all-unset combinations fail capture and entry before app/core/spawn/stop/setup/delete, even if caller supplies replacement paths. Explicit plugin runtime/state overrides still win for valid bindings. See WINDOWS.md for migration/refusal details.
+- The full captured core config fingerprint currently makes any config edit fail closed. Upgrades cannot change core binding automatically; save/quit and manually verify migration. Old unscoped v2 markers must still be detected after adding instance directories.
+- CIM errors/timeouts mean unknown; old markers require save/quit/verified exit and explicit removal. Do not remove them to make a test pass.
+- Copy refuses links/junctions/special files and self-descendants; test actual Windows junctions, not just Unix symlinks.
+- Runtime pruning is deliberately manual. Uninstall blocked by unsaved/hung/legacy daemons keeps mods/runtime.
+- Local recovery on 2026-11-14: Rust 1.100.0 MSVC test build/fmt passed; Rust 248 unit + 7 integration-target tests (including three shared namespace checks) and Lua 115 tests passed with Neovim 0.12.6. Both Node scripts, installer ParseOnly/FixtureOnly/real-Binary sidecar smoke and CIM snapshot/error fixtures passed in isolation. See WINDOWS.md for coverage limits; Unix-only cfg tests were not run.
+- Node paths/controller checks, PowerShell fixture transactions, Linux Docker and macOS screenshots are not ConPTY/GPUI evidence. No real Windows Herdr UI/ConPTY acceptance, CI execution or release publication is implied by this local build/test evidence.

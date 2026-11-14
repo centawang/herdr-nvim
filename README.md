@@ -9,6 +9,7 @@ nvim sidebar one key away, with quick access to the files your agent works on.
 
 > [!TIP]
 > Using the **herdr TUI** (terminal)? Its guide is [TUI.md](TUI.md).
+> Native **Windows x64** setup, validation status and limitations: [WINDOWS.md](WINDOWS.md).
 
 https://github.com/user-attachments/assets/328ab066-29f3-4c39-84c4-30b98449e55e
 
@@ -40,11 +41,30 @@ https://github.com/user-attachments/assets/328ab066-29f3-4c39-84c4-30b98449e55e
 
 ## Requirements
 
-The Herdr app 0.1.11+ on macOS or Linux, and nvim ≥ 0.10. Without nvim the
-installer offers to install it (Homebrew's, else Neovim's own release into
-`~/.local/share/herdr-nvim/nvim`, no sudo).
+The Herdr app and nvim ≥ 0.10. The existing macOS/Linux baseline is app 0.1.11+;
+Windows requires native x64 Herdr/hc, Git and manually installed Neovim (see
+[Windows prerequisites and unverified integration boundaries](WINDOWS.md)).
+On macOS/Linux the installer offers to install missing nvim (Homebrew's, else
+Neovim's own release into `~/.local/share/herdr-nvim/nvim`, no sudo).
 
 ## Install
+
+### Windows (PowerShell)
+
+From a trusted checkout, with the app open:
+
+```powershell
+.\install.ps1 -AppHome "$HOME\.config\herdr-app" # matching release bundle, once published
+# Before Windows assets are published, using an existing Rust/MSVC toolchain:
+.\install.ps1 -Source -AppHome "$HOME\.config\herdr-app"
+```
+
+This installs native `.exe` entries and immutable versioned runtimes, not shell
+wrappers. It does not install dependencies or bind Windows global keys. See
+[WINDOWS.md](WINDOWS.md) for cloning, developing, upgrades, conservative legacy
+pipe handling, uninstall and the validation still required before UI certification.
+
+### macOS / Linux
 
 With the app open, either ask the agent in your Herdr window to *add the mod
 at github.com/ChmaraX/herdr-nvim*, or run:
@@ -65,6 +85,9 @@ curl -fsSL …/install.sh | sh -s -- --app --uninstall           # back to the s
 ```
 
 ## Keys
+
+These are the existing Unix bindings. Windows installs no default global mapping;
+bind the documented actions in the app after checking your keyboard/terminal.
 
 | Key | Does |
 | --- | --- |

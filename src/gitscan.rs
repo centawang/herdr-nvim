@@ -10,15 +10,7 @@ use std::process::Command;
 use anyhow::{Context, Result};
 
 fn absolute_git_path(toplevel: &Path, path: &str) -> String {
-    let joined = toplevel.join(path);
-    #[cfg(windows)]
-    {
-        joined.to_string_lossy().replace('/', "\\")
-    }
-    #[cfg(not(windows))]
-    {
-        joined.to_string_lossy().into_owned()
-    }
+    crate::pathkey::literal(path, toplevel)
 }
 
 /// Shell out to `git -C <cwd> rev-parse --show-toplevel`. `None` if `git`

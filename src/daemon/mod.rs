@@ -4,6 +4,8 @@
 
 pub(crate) mod events;
 pub(crate) mod inventory;
+#[cfg(windows)]
+pub(crate) mod namespace;
 #[cfg(unix)]
 mod nvim_rpc;
 pub(crate) mod process;
@@ -82,6 +84,13 @@ pub fn ensure_daemon(
 ) -> Result<PathBuf> {
     let deadline = Instant::now() + HEALTH_POLL_TIMEOUT;
     let socket = socket_path(tab);
+    #[cfg(windows)]
+    let _starting = StartLock::take(
+        &registry::registry_path(&crate::state::tab_key(tab)),
+        deadline,
+    )?;
+    #[cfg(windows)]
+    registry::check_legacy(&crate::state::tab_key(tab))?;
     match liveness_until(&socket, &config.sidebar, deadline)? {
         Liveness::Answered(_) => {
             // Also (re)register an already-running daemon, so one spawned
@@ -177,6 +186,40 @@ impl StartLock {
     }
 }
 
+// A Windows share-mode lock is released by the OS even if a starter dies.
+// Never unlink the lock file: another waiter may already hold its handle.
+#[cfg(windows)]
+struct StartLock {
+    _held: fs::File,
+}
+#[cfg(windows)]
+impl StartLock {
+    fn take(marker: &Path, deadline: Instant) -> Result<Self> {
+        use std::os::windows::fs::OpenOptionsExt;
+        let path = marker.with_extension("lock");
+        fs::create_dir_all(path.parent().context("lock has no parent")?)?;
+        loop {
+            match fs::OpenOptions::new()
+                .create(true)
+                .truncate(false)
+                .write(true)
+                .share_mode(0)
+                .open(&path)
+            {
+                Ok(file) => return Ok(Self { _held: file }),
+                Err(err) if err.raw_os_error() == Some(32) && Instant::now() < deadline => {
+                    sleep(HEALTH_POLL_INTERVAL)
+                }
+                Err(err) => {
+                    return Err(err).context(
+                        "another daemon is starting; retry shortly (no second daemon was started)",
+                    )
+                }
+            }
+        }
+    }
+}
+
 fn spawn_daemon(
     tab: &str,
     socket: &Path,
@@ -208,13 +251,20 @@ fn spawn_daemon(
     // which pane first spawned the daemon.
     let workspace = TabId::new(tab).workspace().to_owned();
 
+    #[cfg(windows)]
+    let runtime_cmd = format!(
+        "lua vim.opt.rtp:append({:?})",
+        plugin_root.to_string_lossy()
+    );
+    #[cfg(not(windows))]
+    let runtime_cmd = format!("set rtp+={}", plugin_root.display());
     let mut command = nvim_cmd(sidebar);
     command
         .arg("--headless")
         .arg("--listen")
         .arg(socket)
         .arg("--cmd")
-        .arg(format!("set rtp+={}", plugin_root.display()))
+        .arg(runtime_cmd)
         .arg("--cmd")
         .arg(&vim_enter)
         .env("HERDR_WORKSPACE_ID", &workspace)
@@ -233,6 +283,9 @@ fn spawn_daemon(
     // the daemon is now a session leader in its own session and keeps running,
     // tracked from here on only by its socket.
     let _pid = child.id();
+    #[cfg(all(test, windows))]
+    crate::test_support::remember_child(socket, child);
+    #[cfg(not(all(test, windows)))]
     drop(child);
     Ok(())
 }
@@ -333,6 +386,9 @@ pub(crate) fn ready_to_open(tab: &str, sidebar: &Sidebar) -> Result<()> {
 /// never replaced by a second nvim on its socket, which would orphan it with
 /// its unsaved work -- so only a kill ends it.
 fn hung(tab: &str) -> anyhow::Error {
+    #[cfg(windows)]
+    return anyhow::anyhow!("the nvim daemon for tab {tab} is busy or hung; it is kept with its work. Try Esc then :wa and :qa in its pane. Windows cannot safely force-stop it automatically; inspect the exact --listen endpoint in Task Manager before ending that process. Do not remove its marker while it runs.");
+    #[cfg(not(windows))]
     anyhow::anyhow!(
         "the nvim daemon for tab {tab} is busy or hung (no reply within {}s); it is kept: \
          `herdr-nvim daemons stop {tab} --force` kills it and loses its unsaved work",
@@ -462,8 +518,8 @@ impl<T> Liveness<T> {
 /// was deleted) makes it `Unresponsive`, and a table that cannot be read is
 /// an error, never `Gone`. A `Failed` request says nothing about liveness
 /// either, so it is an error too. `table` is one already loaded, if any; else one
-/// is loaded when the verdict needs it. Windows reads no command lines, so
-/// there a refusal stands and no table is loaded.
+/// is loaded when the verdict needs it. Windows uses a checked CIM snapshot;
+/// an inspection failure never means Gone.
 pub(crate) fn liveness<T>(
     socket: &Path,
     reply: Reply<T>,
@@ -473,12 +529,6 @@ pub(crate) fn liveness<T>(
         Reply::Answered(answer) => Liveness::Answered(answer),
         Reply::TimedOut => Liveness::Unresponsive,
         Reply::Failed(error) => bail!("{error}"),
-        #[cfg(windows)]
-        Reply::Refused => {
-            let _ = (socket, table);
-            Liveness::Gone
-        }
-        #[cfg(unix)]
         Reply::Refused => {
             let loaded;
             let table = match table {
@@ -836,6 +886,60 @@ pub(crate) fn plugin_root() -> Result<PathBuf> {
 mod tests {
     use super::*;
     use crate::test_support::{nvim_available, TestDaemon, TestEnv};
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_start_lock_is_exclusive_bounded_and_released_on_drop() {
+        let env = TestEnv::new();
+        let marker = env.runtime_dir().join("start.pipe");
+        let first = StartLock::take(&marker, Instant::now() + Duration::from_secs(1)).unwrap();
+        let start = Instant::now();
+        assert!(StartLock::take(&marker, start + Duration::from_millis(50)).is_err());
+        assert!(start.elapsed() < Duration::from_secs(1));
+        drop(first);
+        assert!(StartLock::take(&marker, Instant::now() + Duration::from_secs(1)).is_ok());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_concurrent_starters_reuse_one_daemon() {
+        if !nvim_available() {
+            eprintln!("skipping: nvim not found on PATH");
+            return;
+        }
+        let _env = TestEnv::new();
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let config = Config::default();
+        let results = std::thread::scope(|scope| {
+            let starts: Vec<_> = (0..4)
+                .map(|_| scope.spawn(|| ensure_daemon("wConcurrent", &root, &config, &root)))
+                .collect();
+            starts
+                .into_iter()
+                .map(|start| start.join().unwrap())
+                .collect::<Vec<_>>()
+        });
+        let socket = socket_path("wConcurrent");
+        let pid = ask_expr(&socket, "getpid()", &config.sidebar)
+            .unwrap()
+            .parse()
+            .unwrap();
+        let daemon = TestDaemon {
+            tab: TabId::new("wConcurrent"),
+            socket: socket.clone(),
+            pid,
+        };
+        for result in results {
+            assert_eq!(result.unwrap(), socket);
+        }
+        assert_eq!(
+            process::ProcessTable::load()
+                .unwrap()
+                .listeners(&socket)
+                .unwrap(),
+            vec![daemon.pid]
+        );
+    }
 
     // herdr hands the plugin the herdr server's PATH, which may lack the
     // folder nvim is in. The error is what the person sees in the sidebar

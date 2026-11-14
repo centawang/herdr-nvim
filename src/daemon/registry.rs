@@ -47,9 +47,19 @@ const QUIT_POLL_INTERVAL: Duration = Duration::from_millis(50);
 /// subfolder, `HostOps::socket_subdir`): each host reaps the daemons whose tab
 /// it does not know, so the TUI's `daemon-gc` must never see the app's daemons
 /// (and the app's reconcile must never see the TUI's).
-fn socket_dir() -> PathBuf {
+fn unscoped_socket_dir() -> PathBuf {
     let base = env::var_os("HERDR_NVIM_RUNTIME_DIR")
         .map(PathBuf::from)
+        .or_else(|| {
+            #[cfg(windows)]
+            {
+                crate::app::instance::storage_base(true)
+            }
+            #[cfg(not(windows))]
+            {
+                None
+            }
+        })
         .or_else(|| {
             env::var_os("XDG_RUNTIME_DIR").map(|path| PathBuf::from(path).join("herdr-nvim"))
         })
@@ -58,6 +68,13 @@ fn socket_dir() -> PathBuf {
         Some(sub) => base.join(sub),
         None => base,
     }
+}
+
+fn socket_dir() -> PathBuf {
+    let base = unscoped_socket_dir();
+    #[cfg(windows)]
+    let base = crate::app::instance::scope_dir(base);
+    base
 }
 
 /// Extension of the per-daemon entries in `socket_dir` (see there).
@@ -74,7 +91,7 @@ pub fn socket_path(tab: &str) -> PathBuf {
 pub(crate) fn socket_path_for_key(key: &str) -> PathBuf {
     #[cfg(windows)]
     {
-        PathBuf::from(format!(r"\\.\pipe\herdr-nvim-{key}"))
+        super::namespace::pipe(&socket_dir(), key)
     }
     #[cfg(not(windows))]
     {
@@ -96,13 +113,71 @@ pub(super) fn register_daemon(tab: &str) -> Result<()> {
     let dir = socket_dir();
     fs::create_dir_all(&dir)
         .with_context(|| format!("failed to create runtime directory {}", dir.display()))?;
-    fs::write(&marker, tab)
-        .with_context(|| format!("failed to write daemon marker {}", marker.display()))
+    fs::write(
+        &marker,
+        serde_json::json!({"version": 2, "tab": tab, "endpoint": socket_path(tab)}).to_string(),
+    )
+    .with_context(|| format!("failed to write daemon marker {}", marker.display()))
+}
+
+/// Old global pipes cannot be adopted safely: they may belong to another host
+/// or hold unsaved work. Never start a replacement or delete an old marker.
+#[cfg(windows)]
+pub(super) fn check_legacy(key: &str) -> Result<()> {
+    check_unscoped_markers()?;
+    let marker = registry_path(key);
+    if marker.exists() {
+        let text = fs::read_to_string(&marker)?;
+        let value: serde_json::Value = serde_json::from_str(&text).unwrap_or_default();
+        if value.get("version").and_then(serde_json::Value::as_u64) != Some(2)
+            || value.get("endpoint").and_then(serde_json::Value::as_str)
+                != socket_path_for_key(key).to_str()
+        {
+            anyhow::bail!("legacy or foreign daemon marker {}; save and :qa in the old nvim, verify the old process has exited, then remove this marker manually and retry. Nothing was stopped or replaced", marker.display());
+        }
+        // This namespace was already checked when the v2 marker was made.
+        // Reusing a healthy daemon must not queue a fresh CIM scan per caller.
+        return Ok(());
+    }
+    let old = PathBuf::from(format!(r"\\.\pipe\herdr-nvim-{key}"));
+    let table = process::ProcessTable::load()?;
+    let v2 = super::namespace::pipe(&unscoped_socket_dir(), key);
+    if socket_dir() != unscoped_socket_dir() && !table.listeners(&v2)?.is_empty() {
+        anyhow::bail!("unscoped v2 nvim still uses {}; save and :qa, verify exit and migrate manually; no replacement was started", v2.display());
+    }
+    if !table.listeners(&old)?.is_empty() {
+        anyhow::bail!("legacy nvim still uses {}; save and :qa in the old pane before upgrading. No new daemon was started", old.display());
+    }
+    Ok(())
+}
+
+/// Changing directories must not hide pre-instance daemons, including v2.
+/// Their ownership is unknowable, so even stop/reconcile refuses all IO.
+#[cfg(windows)]
+fn check_unscoped_markers() -> Result<()> {
+    let old = unscoped_socket_dir();
+    if socket_dir() == old {
+        return Ok(());
+    }
+    let entries = match fs::read_dir(&old) {
+        Ok(entries) => entries,
+        Err(e) if e.kind() == ErrorKind::NotFound => return Ok(()),
+        Err(e) => return Err(e).context("cannot check old daemon registry"),
+    };
+    for entry in entries {
+        let path = entry?.path();
+        if path.extension().and_then(OsStr::to_str) == Some("pipe") {
+            anyhow::bail!("unscoped legacy/v2 marker {}; save and quit old nvims, verify their exit, then remove only this marker manually. Nothing was stopped or replaced", path.display());
+        }
+    }
+    Ok(())
 }
 
 /// Sanitized tab keys of every registered daemon (see `socket_dir`), sorted.
 /// Empty when the runtime directory does not exist yet.
 pub(crate) fn daemon_keys() -> Result<Vec<String>> {
+    #[cfg(windows)]
+    check_unscoped_markers()?;
     let dir = socket_dir();
     let entries = match fs::read_dir(&dir) {
         Ok(entries) => entries,
@@ -228,6 +303,8 @@ fn probe_expr() -> String {
 
 /// Ask the daemon of `key` the `Probe` questions.
 pub(crate) fn probe(key: &str, sidebar: &Sidebar) -> Result<Reply<Probe>> {
+    #[cfg(windows)]
+    check_legacy(key)?;
     let socket = socket_path_for_key(key);
     let context = || format!("could not query the nvim daemon of tab {key}");
     Ok(
@@ -379,6 +456,18 @@ mod tests {
         }
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn legacy_marker_is_kept_and_refuses_automatic_upgrade() {
+        let env = TestEnv::new();
+        fs::create_dir_all(env.runtime_dir()).unwrap();
+        let marker = registry_path("legacy");
+        fs::write(&marker, "legacy").unwrap();
+        let error = check_legacy("legacy").unwrap_err().to_string();
+        assert!(error.contains("save and :qa"));
+        assert_eq!(fs::read_to_string(marker).unwrap(), "legacy");
+    }
+
     #[test]
     fn socket_path_respects_runtime_dir_override() {
         let env = TestEnv::new();
@@ -386,10 +475,9 @@ mod tests {
         assert_eq!(socket_path("wsX"), env.runtime_dir().join("wsX.sock"));
         #[cfg(windows)]
         {
-            let _ = env;
             assert_eq!(
                 socket_path("wsX"),
-                PathBuf::from(r"\\.\pipe\herdr-nvim-wsX")
+                super::super::namespace::pipe(&env.runtime_dir(), "wsX")
             );
         }
     }
@@ -401,10 +489,9 @@ mod tests {
         assert_eq!(socket_path("wX:t1"), env.runtime_dir().join("wX_t1.sock"));
         #[cfg(windows)]
         {
-            let _ = env;
             assert_eq!(
                 socket_path("wX:t1"),
-                PathBuf::from(r"\\.\pipe\herdr-nvim-wX_t1")
+                super::super::namespace::pipe(&env.runtime_dir(), "wX_t1")
             );
         }
     }
@@ -417,8 +504,16 @@ mod tests {
         fs::create_dir_all(env.runtime_dir()).unwrap();
         let keep = registry_path(&tab_key("wsKeep:t1"));
         let orphan = registry_path(&tab_key("wsOrphan:t1"));
-        fs::write(&keep, b"").unwrap();
-        fs::write(&orphan, b"").unwrap();
+        #[cfg(not(windows))]
+        {
+            fs::write(&keep, b"").unwrap();
+            fs::write(&orphan, b"").unwrap();
+        }
+        #[cfg(windows)]
+        {
+            register_daemon("wsKeep:t1").unwrap();
+            register_daemon("wsOrphan:t1").unwrap();
+        }
 
         let mut herdr = MockHerdr {
             tab_infos_results: VecDeque::from([Ok(vec![live("wsKeep:t1")])]),

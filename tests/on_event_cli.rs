@@ -150,8 +150,9 @@ fn on_event_exits_cleanly_for_missing_malformed_and_irrelevant_events() {
         let output = sandbox.run(&["on-event"], event_json);
         assert!(
             output.status.success(),
-            "{event_json:?}: exit {:?}",
-            output.status
+            "{event_json:?}: exit {:?}: {}",
+            output.status,
+            String::from_utf8_lossy(&output.stderr)
         );
         assert!(
             output.stderr.is_empty(),

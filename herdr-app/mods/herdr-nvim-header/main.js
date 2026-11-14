@@ -16,6 +16,8 @@
 import { div } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { appHome, exec, panes, props, readTextFile, run, shared, spaces, terminals, theme, watchFolder } from "herdr";
+import { entry } from "./runtime.js";
+import { basename, dirname, wire, same } from "./paths.js";
 import Pane from "./pane-base.js";
 
 const KINDS = {
@@ -23,9 +25,7 @@ const KINDS = {
   png: "image", jpg: "image", jpeg: "image", gif: "image", webp: "image", bmp: "image", ico: "image", svg: "image",
 };
 const kindOf = (path) => KINDS[/\.([^./]+)$/.exec(path ?? "")?.[1]?.toLowerCase()] ?? null;
-const basename = (p) => p.replace(/^.*\//, "");
-const dirname = (p) => p.replace(/\/[^/]*$/, "") || "/";
-const bin = () => `${appHome()}/mods/herdr-nvim/bin/herdr-nvim`;
+const bin = () => entry ?? `${appHome()}/mods/herdr-nvim/bin/herdr-nvim`;
 
 // How long a failed first look waits before asking again.
 const RETRY_MS = 2000;
@@ -93,10 +93,10 @@ export default class Header extends Pane {
         // batch naming the folder itself may be anything).
         const changed = await watchFolder(dirname(at.watch));
         if (this.closed) return;
-        if (changed.length && !changed.some((p) => p.startsWith(at.watch) || p === dirname(at.watch))) continue;
+        if (changed.length && !changed.some((p) => same(p, at.watch) || same(p, dirname(at.watch)))) continue;
         const text = await readTextFile(at.watch).catch(() => null);
         let file = null;
-        try { file = (text && JSON.parse(text).file) || null; } catch {}
+        try { file = wire((text && JSON.parse(text).file) || null); } catch {}
         if (file !== this.file) { this.file = file; cx.notify(); }
       }
     });

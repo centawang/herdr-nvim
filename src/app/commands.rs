@@ -46,7 +46,7 @@ pub fn send_cmd() -> Result<()> {
     if !submit {
         return rpc::paste(terminal, text);
     }
-    let output = rpc::hc()
+    let output = rpc::hc()?
         .args(["send", terminal, text])
         .stdin(Stdio::null())
         .output()
@@ -268,7 +268,7 @@ pub fn install_nvim_cmd() -> Result<()> {
 
 #[cfg(not(unix))]
 pub fn install_nvim_cmd() -> Result<()> {
-    bail!("install Neovim 0.10+ yourself (winget install Neovim.Neovim), then press cmd-e again")
+    bail!("install Neovim 0.10+ manually from https://neovim.io; put nvim.exe on PATH or set [sidebar] nvim_bin to its full path, then reopen Files. No automatic Windows installation is performed")
 }
 
 #[cfg(test)]

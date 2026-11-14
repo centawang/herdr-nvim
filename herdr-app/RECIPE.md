@@ -11,7 +11,21 @@ you write in nvim go to the agent with their `file:line`.
 
 Don't copy the folders: herdr-nvim needs its binary, and it edits the
 person's layout, which copying doesn't do. With the app open, run its
-installer:
+installer. On Windows x64, from a trusted checkout use native PowerShell:
+
+```powershell
+.\install.ps1 -AppHome "$HOME\.config\herdr-app"
+# If matching Windows release assets are not published yet, existing Rust/MSVC:
+.\install.ps1 -Source -AppHome "$HOME\.config\herdr-app"
+```
+
+See [WINDOWS.md](../WINDOWS.md): Neovim is installed manually, global keys are
+opt-in, runtimes are immutable under LOCALAPPDATA, and unsafe hung-daemon kills
+are refused. Never point validation at the person's real app home. Node mocks
+and Unix UI tests do not certify Windows UI. The instructions below describe
+macOS/Linux defaults; on Windows the missing-Neovim card only gives guidance.
+
+macOS/Linux:
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/ChmaraX/herdr-nvim/main/install.sh | sh -s -- --app

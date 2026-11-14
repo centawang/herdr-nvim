@@ -230,7 +230,8 @@ end
 
 -- Real paths: the tree works with them (/private/tmp, not /tmp).
 local function real(path)
-  return vim.uv.fs_realpath(path) or vim.fn.resolve(vim.fn.fnamemodify(path, ":p"))
+  local resolved = vim.uv.fs_realpath(path) or vim.fn.resolve(vim.fn.fnamemodify(path, ":p"))
+  return vim.fn.has("win32") == 1 and vim.fs.normalize(resolved) or resolved
 end
 
 -- The current file for the tree to follow (real files only), and the folder.

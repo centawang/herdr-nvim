@@ -288,7 +288,7 @@ pub fn setup_cmd() -> Result<()> {
     let home = home();
     let ours = keys_file(&args)?;
     let keys = home.join("keys.json");
-    if !keys.exists() {
+    if args.first().map(String::as_str) != Some("check") && !keys.exists() {
         fs::write(&keys, "{}\n")?;
     }
     match args.first().map(String::as_str) {

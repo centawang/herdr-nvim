@@ -1,5 +1,23 @@
 local prompt = require("herdr-nvim.prompt")
 
+T.test("prompt: native Windows separators and UNC keep their root", function()
+  if vim.fn.has("win32") == 0 then
+    T.eq(prompt._relpath([[/tmp/legal\name]], "/tmp"), [[legal\name]])
+    return
+  end
+  local uv = vim.uv or vim.loop
+  local realpath = uv.fs_realpath
+  uv.fs_realpath = function() return nil end -- synthetic paths, never contact SMB
+  local ok, err = pcall(function()
+    T.eq(prompt._relpath([[C:\not-existing\空 格\a.rs]], "C:/not-existing"), "空 格/a.rs")
+    T.eq(prompt._relpath([[C:\not-existing\a.rs]], "C:/"), "not-existing/a.rs")
+    T.eq(prompt._relpath([[\\server\share\a.rs]], [[\\server\share]]), "a.rs")
+  end)
+  uv.fs_realpath = realpath
+  assert(ok, err)
+end)
+
+
 T.test("prompt: single comment, no git context", function()
   local s = prompt.format({
     { comment = { file = "/tmp/x.py", start_line = 5, end_line = 5, text = "rename to double" },

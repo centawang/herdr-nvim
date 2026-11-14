@@ -32,3 +32,8 @@ pub(crate) fn tab_id(space: &str, tab: &str) -> String {
 pub(crate) fn raw_tab(tab: &str) -> &str {
     tab.split_once(':').map_or(tab, |(_, tab)| tab)
 }
+
+pub(crate) mod entry;
+pub(crate) mod files;
+#[cfg(windows)]
+pub(crate) mod instance;

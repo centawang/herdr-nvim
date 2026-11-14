@@ -24,8 +24,16 @@ pub(crate) fn hc_bin() -> String {
 }
 
 /// A `hc` command for the CLI paths (`hc read`, `hc send`, `hc events`).
-pub(crate) fn hc() -> Command {
-    Command::new(hc_bin())
+pub(crate) fn hc() -> Result<Command> {
+    #[cfg(windows)]
+    if let Ok(binding) = env::var("HERDR_NVIM_CORE_BINDING") {
+        // configure validated this immutable entry before threads started.
+        let core: super::instance::Core =
+            serde_json::from_str(&binding).expect("validated core binding");
+        core.verify()?;
+        return Ok(core.command());
+    }
+    Ok(Command::new(hc_bin()))
 }
 
 /// Line-mode connection: requests and replies are JSON lines.
@@ -40,7 +48,7 @@ pub(crate) struct Rpc {
 
 /// A running `hc connect`, its stdin and its stdout.
 fn spawn_connect() -> Result<(Child, ChildStdin, BufReader<ChildStdout>)> {
-    let mut child = hc()
+    let mut child = hc()?
         .arg("connect")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

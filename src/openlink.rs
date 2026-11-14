@@ -60,11 +60,25 @@ fn percent_decode(s: &str) -> String {
 /// `None` for input that isn't a `file://` URL.
 fn strip_file_url(clicked: &str) -> Option<String> {
     let rest = clicked.strip_prefix("file://")?;
+    #[cfg(windows)]
+    if rest.as_bytes().first().is_some_and(u8::is_ascii_alphabetic)
+        && rest.as_bytes().get(1) == Some(&b':')
+        && rest.as_bytes().get(2) == Some(&b'/')
+    {
+        return Some(percent_decode(rest));
+    }
     let path_part = if rest.starts_with('/') {
         rest
     } else {
-        let slash = rest.find('/')?;
-        &rest[slash..]
+        let (host, _path) = rest.split_once('/')?;
+        if !host.eq_ignore_ascii_case("localhost") {
+            // Never drop a remote authority and silently open a local file.
+            #[cfg(windows)]
+            return Some(percent_decode(&format!("//{rest}")));
+            #[cfg(not(windows))]
+            return None;
+        }
+        &rest[host.len()..]
     };
     #[cfg(windows)]
     let path_part = if path_part.len() >= 3 && path_part.as_bytes()[2] == b':' {
@@ -83,7 +97,11 @@ fn strip_file_url(clicked: &str) -> Option<String> {
 /// path-shaped (mirrors `extract::parse_token`'s heuristic: needs a `/` and
 /// is absolute/`~`/`./`/has an extension).
 pub(crate) fn parse_clicked(text: &str) -> Option<(String, Option<u32>)> {
-    let decoded = strip_file_url(text).unwrap_or_else(|| text.to_owned());
+    let decoded = if text.starts_with("file://") {
+        strip_file_url(text)?
+    } else {
+        text.to_owned()
+    };
     let trimmed = strip_trailing_punct(&decoded);
     let (path, line) = parse_token(trimmed)?;
     Some((path.to_owned(), line))
@@ -214,6 +232,25 @@ mod tests {
     #[test]
     fn bare_filename_without_slash_is_not_path_shaped() {
         assert_eq!(parse_clicked("README.md"), None);
+    }
+
+    #[test]
+    fn remote_file_authorities_are_never_dropped() {
+        #[cfg(windows)]
+        assert_eq!(
+            parse_clicked("file://server/share/a.rs:7"),
+            Some(("//server/share/a.rs".into(), Some(7)))
+        );
+        #[cfg(not(windows))]
+        assert_eq!(parse_clicked("file://server/share/a.rs:7"), None);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn file_urls_keep_drive_and_line_separate() {
+        for url in ["file:///C:/repo/a.rs:12", "file://C:/repo/a.rs:12"] {
+            assert_eq!(parse_clicked(url), Some(("C:/repo/a.rs".into(), Some(12))));
+        }
     }
 
     #[test]

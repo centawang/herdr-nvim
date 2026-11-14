@@ -1,45 +1,17 @@
-Set-StrictMode -Version Latest
-$ErrorActionPreference = "Stop"
-
-$root = Split-Path -Parent (Split-Path -Parent $MyInvocation.MyCommand.Path)
-$bin = Join-Path $root "bin"
-$targetDir = if ($env:CARGO_TARGET_DIR) { $env:CARGO_TARGET_DIR } else { Join-Path $root "target" }
-if (-not [System.IO.Path]::IsPathRooted($targetDir)) {
-    $targetDir = Join-Path $root $targetDir
-}
-$target = Join-Path $targetDir "release\herdr-nvim.exe"
-
-New-Item -ItemType Directory -Force -Path $bin | Out-Null
-Push-Location $root
+# TUI manifest hook: matching release first, never require Git Bash/WSL.
+[CmdletBinding()]
+param([switch]$Source = ($env:HERDR_NVIM_BUILD_FROM_SOURCE -eq '1'), [string]$Profile = 'release', [string]$Target = 'x86_64-pc-windows-msvc')
+. (Join-Path $PSScriptRoot 'windows.ps1')
+Assert-WindowsX64
+$root = Split-Path -Parent $PSScriptRoot
+$temp = Join-Path ([IO.Path]::GetTempPath()) ('hn-install-' + [guid]::NewGuid().ToString('N'))
+New-Item -ItemType Directory -Path $temp | Out-Null
 try {
-    $vsDevCmdCandidates = @(
-        (Join-Path ${env:ProgramFiles} "Microsoft Visual Studio\2022\Professional\Common7\Tools\VsDevCmd.bat"),
-        (Join-Path ${env:ProgramFiles} "Microsoft Visual Studio\2022\Enterprise\Common7\Tools\VsDevCmd.bat"),
-        (Join-Path ${env:ProgramFiles} "Microsoft Visual Studio\2022\Community\Common7\Tools\VsDevCmd.bat"),
-        (Join-Path ${env:ProgramFiles} "Microsoft Visual Studio\2022\BuildTools\Common7\Tools\VsDevCmd.bat")
-    )
-    $vsDevCmd = $null
-    foreach ($candidate in $vsDevCmdCandidates) {
-        if (Test-Path -LiteralPath $candidate) {
-            $vsDevCmd = $candidate
-            break
-        }
+    if ($Source) { $binary = Build-HerdrNvim $root $Profile $Target }
+    else {
+        $version = Get-HerdrNvimVersion $root
+        $binary = Join-Path $temp 'herdr-nvim.exe'
+        Receive-CheckedAsset "https://github.com/ChmaraX/herdr-nvim/releases/download/v$version/herdr-nvim-x86_64-pc-windows-msvc.exe" $binary
     }
-    if (-not $vsDevCmd) {
-        throw "Visual Studio 2022 Developer Command Prompt was not found"
-    }
-
-    $buildCommand = "call `"$vsDevCmd`" -arch=x64 && cargo build --release"
-    & cmd.exe /d /c $buildCommand
-    if ($LASTEXITCODE -ne 0) {
-        throw "cargo build --release failed with exit code $LASTEXITCODE"
-    }
-}
-finally {
-    Pop-Location
-}
-
-if (-not (Test-Path -LiteralPath $target)) {
-    throw "Build completed but $target was not created"
-}
-Copy-Item -LiteralPath $target -Destination (Join-Path $bin "herdr-nvim.exe") -Force
+    Set-HerdrNvimBinary $binary (Join-Path $root 'bin/herdr-nvim.exe')
+} finally { Remove-Item -LiteralPath $temp -Recurse -Force }

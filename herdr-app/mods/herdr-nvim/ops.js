@@ -4,6 +4,8 @@
 // where a path may go.
 
 import { exec, focused, notify, readTextFile, setShared, shared, window } from "herdr";
+import { join, inside, wire } from "./paths.js";
+export { join, inside } from "./paths.js";
 import { bin, nvim } from "./lib.js";
 
 // The tab the tree works for: what `--ctx` takes. No folder: herdr-nvim
@@ -57,7 +59,9 @@ export async function findFiles(root, query) {
 // The file the tab's nvim shows, and the file to watch for its changes.
 export async function current(place) {
   const out = await nvim("app-current", [], tabOf(place));
-  return out === null ? { file: null, watch: null } : JSON.parse(out);
+  if (out === null) return { file: null, watch: null };
+  const state = JSON.parse(out);
+  return { ...state, file: wire(state.file), watch: wire(state.watch), tab_root: wire(state.tab_root) };
 }
 
 // herdr-nvim's `tree` setting ("native" or "nvim"), read at the moment it
@@ -91,18 +95,4 @@ export async function systemOpen(path) {
   const opener = window()?.platform === "windows" ? "explorer.exe" : window()?.platform === "linux" ? "xdg-open" : "open";
   const r = await exec(opener, [path]).catch((e) => ({ code: 1, stderr: String(e) }));
   if (r.code !== 0) notify({ title: "Cannot open", body: r.stderr || path, level: "error" });
-}
-
-// Whether `path` is the folder `root` or inside it.
-export function inside(path, root) {
-  return path === root || path.startsWith(`${root.replace(/\/$/, "")}/`);
-}
-
-export function join(dir, name) {
-  const parts = [];
-  for (const part of `${dir}/${name}`.split("/")) {
-    if (part === "..") parts.pop();
-    else if (part && part !== ".") parts.push(part);
-  }
-  return `/${parts.join("/")}`;
 }

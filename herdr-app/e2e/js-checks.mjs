@@ -62,7 +62,12 @@ assert.equal(markOf(marks, "/r/src/other.js"), null);
 
 // A folder's listing (the script's records): folders first, then by name;
 // the names git ignores, a folder's without its slash.
-app.exec = async () => ok("f\0b.txt\0d\0src\0f\0a.txt\0d\0build\0x\0x\0build/\0a.txt\0");
+const listing = (dirs, files, ignored = []) => JSON.stringify({ entries: [...dirs.map(name => ({ name, dir: true })), ...files.map(name => ({ name, dir: false }))], ignored });
+app.exec = async (cmd, args) => {
+  assert.notEqual(cmd, "sh");
+  assert.deepEqual(args, ["app-files", "list", "/r"]);
+  return ok(listing(["src", "build"], ["b.txt", "a.txt"], ["build", "a.txt"]));
+};
 assert.deepEqual(await listFolder("/r"), {
   entries: [{ name: "build", dir: true }, { name: "src", dir: true }, { name: "a.txt", dir: false }, { name: "b.txt", dir: false }],
   ignored: new Set(["build", "a.txt"]),
@@ -73,10 +78,10 @@ await assert.rejects(listFolder("/gone"), /Cannot list \/gone/);
 // The tree model: a watch batch lists again only the folders on screen it
 // touches; a build in an ignored folder lists nothing; the same listing
 // again changes no rows.
-const listings = { "/r": "d\0src\0d\0target\0f\0x.md\0x\0x\0target\0", "/r/src": "f\0a.js\0x\0x\0", "/r/target": "f\0out\0x\0x\0" };
+const listings = { "/r": listing(["src", "target"], ["x.md"], ["target"]), "/r/src": listing([], ["a.js"]), "/r/target": listing([], ["out"]) };
 let listed = [];
 app.exec = async (cmd, args) => {
-  if (cmd === "sh") { listed.push(args[3]); return ok(listings[args[3]]); }
+  if (args[0] === "app-files") { listed.push(args[2]); return ok(listings[args[2]]); }
   return args[0] === "rev-parse" ? ok("/r\n") : ok("");
 };
 const model = new TreeModel();

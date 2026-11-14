@@ -16,9 +16,11 @@
 use std::{
     env,
     path::{Path, PathBuf},
-    process::{Command, Stdio},
     time::{Duration, SystemTime},
 };
+
+#[cfg(unix)]
+use std::process::{Command, Stdio};
 
 use serde_json::Value;
 
@@ -48,7 +50,12 @@ pub(crate) fn agent_kind(facts: &Value) -> Option<AgentKind> {
         let name = name.to_ascii_lowercase();
         if name.contains("claude") {
             Some(AgentKind::Claude)
-        } else if name == "pi" || name.starts_with("pi-") || name.starts_with("pi ") {
+        } else if name == "pi"
+            || name == "pi.exe"
+            || name == "pi.cmd"
+            || name.starts_with("pi-")
+            || name.starts_with("pi ")
+        {
             Some(AgentKind::Pi)
         } else {
             None
@@ -107,12 +114,23 @@ fn started(facts: &Value) -> Option<SystemTime> {
         .pointer("/foreground/pid")
         .and_then(Value::as_u64)
         .and_then(|pid| {
-            let out = Command::new("ps")
-                .args(["-o", "etime=", "-p", &pid.to_string()])
-                .stderr(Stdio::null())
-                .output()
-                .ok()?;
-            parse_etime(&String::from_utf8_lossy(&out.stdout))
+            #[cfg(windows)]
+            {
+                let pid = u32::try_from(pid).ok()?;
+                crate::daemon::process::ProcessTable::load()
+                    .ok()?
+                    .uptime(pid)
+                    .map(Duration::from_secs)
+            }
+            #[cfg(unix)]
+            {
+                let out = Command::new("ps")
+                    .args(["-o", "etime=", "-p", &pid.to_string()])
+                    .stderr(Stdio::null())
+                    .output()
+                    .ok()?;
+                parse_etime(&String::from_utf8_lossy(&out.stdout))
+            }
         })
         .and_then(|age| SystemTime::now().checked_sub(age));
     from_pid.or_else(|| {
@@ -213,6 +231,10 @@ mod tests {
         assert_eq!(
             agent_kind(&json!({"foreground": {"name": "claude"}})),
             Some(AgentKind::Claude)
+        );
+        assert_eq!(
+            agent_kind(&json!({"foreground": {"name": "pi.exe"}})),
+            Some(AgentKind::Pi)
         );
         assert_eq!(agent_kind(&json!({"foreground": {"name": "pip"}})), None);
         assert_eq!(agent_kind(&json!({"status": {"app": "codex"}})), None);

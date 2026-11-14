@@ -1,0 +1,7 @@
+{
+  "version": 3,
+  "selectors": [
+    "HC_SESSION", "HC_SOCKET", "HOME", "USERPROFILE", "XDG_CONFIG_HOME",
+    "XDG_STATE_HOME", "XDG_RUNTIME_DIR", "TEMP", "TMP", "APPDATA", "LOCALAPPDATA"
+  ]
+}

@@ -10,7 +10,8 @@
 
 import { div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { appHome, closeOverlay, openOverlay, props, readTextFile, run, setShared, shared, theme } from "herdr";
+import { appHome, closeOverlay, openOverlay, props, readTextFile, run, setShared, shared, theme, window } from "herdr";
+import { bin } from "./lib.js";
 import { appConfig } from "./ops.js";
 
 // The last time the "Neovim is needed" card opened: several requests failing
@@ -76,9 +77,9 @@ export class Card {
   submit() {
     const card = props().card;
     this.close();
-    if (card.kind === "nvim") {
+    if (card.kind === "nvim" && window()?.platform !== "windows") {
       run("terminal.open", {
-        argv: [`${appHome()}/mods/herdr-nvim/bin/herdr-nvim`, "app-install-nvim", "--pause"],
+        argv: [bin(), "app-install-nvim", "--pause"],
         place: "tab", name: "Install Neovim",
       });
     }
@@ -107,10 +108,10 @@ export class Card {
         .child(title(`Neovim ${card.need ?? "0.10"} or newer is needed`))
         .child(div().text_color(t.muted).child(`herdr-nvim runs each tab's nvim with it, and ${what}.`))
         .child(div().text_size(11.5).text_color(t.dim).child(
-          "Install opens a terminal tab that installs it: with Homebrew (brew install neovim), else Neovim's own release into ~/.local/share/herdr-nvim/nvim, no sudo. Then press cmd-e again."))
+          window()?.platform === "windows" ? "Install Neovim 0.10+ manually from https://neovim.io. Add nvim.exe to PATH, or set [sidebar] nvim_bin to its full path in herdr-nvim/config.toml, then reopen Files. Nothing is downloaded automatically." : "Install opens a terminal tab that installs it: with Homebrew (brew install neovim), else Neovim's own release into ~/.local/share/herdr-nvim/nvim, no sudo. Then press cmd-e again."))
         .child(h_flex().pt(8).gap(8).justify_end()
           .child(button("card-cancel", "Not now", false, () => this.close()))
-          .child(button("card-install", "Install Neovim", true, () => this.submit())));
+          .child(button("card-install", window()?.platform === "windows" ? "Got it" : "Install Neovim", true, () => this.submit())));
     }
     return shell
       .child(title("nvim is ready"))

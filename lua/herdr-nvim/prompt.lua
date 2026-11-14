@@ -26,6 +26,12 @@ function M._relpath(file, cwd)
   if not cwd or cwd == "" then
     return file
   end
+  if vim.fn.has("win32") == 1 then
+    file, cwd = vim.fs.normalize(file), vim.fs.normalize(cwd)
+    local uv = vim.uv or vim.loop
+    file = vim.fs.normalize(uv.fs_realpath(file) or file)
+    cwd = vim.fs.normalize(uv.fs_realpath(cwd) or cwd)
+  end
   local prefix = cwd:gsub("/$", "") .. "/"
   if file:sub(1, #prefix) == prefix then
     return file:sub(#prefix + 1)

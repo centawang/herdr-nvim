@@ -109,13 +109,26 @@ pub(crate) fn remove_file_if_exists(path: &Path) -> Result<()> {
 }
 
 fn state_dir() -> PathBuf {
-    env::var_os("HERDR_NVIM_STATE_DIR")
+    let base = env::var_os("HERDR_NVIM_STATE_DIR")
         .map(PathBuf::from)
+        .or_else(|| {
+            #[cfg(windows)]
+            {
+                crate::app::instance::storage_base(false)
+            }
+            #[cfg(not(windows))]
+            {
+                None
+            }
+        })
         .or_else(|| {
             env::var_os("XDG_STATE_HOME").map(|path| PathBuf::from(path).join("herdr-nvim"))
         })
         .or_else(|| crate::home::home_dir().map(|path| path.join(".local/state/herdr-nvim")))
-        .unwrap_or_else(|| PathBuf::from(".herdr-nvim-state"))
+        .unwrap_or_else(|| PathBuf::from(".herdr-nvim-state"));
+    #[cfg(windows)]
+    let base = crate::app::instance::scope_dir(base);
+    base
 }
 
 /// Where the detached pick-file finisher writes its errors (it has no pane

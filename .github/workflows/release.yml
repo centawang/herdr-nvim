@@ -57,3 +57,46 @@ jobs:
             herdr-nvim-${{ matrix.target }}
             herdr-nvim-app-${{ matrix.target }}.tar.gz
             herdr-nvim-app-${{ matrix.target }}.tar.gz.sha256
+
+  build-windows:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.tag }}
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: rhysd/action-setup-vim@v1
+        with:
+          neovim: true
+          version: v0.12.5
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - name: Required native tools (fail, never silently skip)
+        shell: pwsh
+        run: |
+          'cargo','rustc','nvim','git','node','powershell.exe' | ForEach-Object { Get-Command $_ -ErrorAction Stop | Out-Null }
+          nvim --version
+      - run: cargo test --locked
+      - run: nvim --headless --noplugin -u NONE -l tests/run.lua
+      - run: node herdr-app/e2e/js-checks.mjs
+      - run: node herdr-app/e2e/windows-paths.mjs
+      - run: cargo build --locked --release --target x86_64-pc-windows-msvc
+      - name: Native installer smoke
+        run: ./tests/windows-install.ps1 -Binary ./target/x86_64-pc-windows-msvc/release/herdr-nvim.exe
+      - name: Package native binary and desktop bundle
+        shell: pwsh
+        run: |
+          $name = 'herdr-nvim-x86_64-pc-windows-msvc.exe'
+          Copy-Item target/x86_64-pc-windows-msvc/release/herdr-nvim.exe $name
+          $hash = (Get-FileHash $name -Algorithm SHA256).Hash.ToLower()
+          [IO.File]::WriteAllText("$name.sha256", "$hash  $name`n")
+          ./herdr-app/bundle.ps1 -Binary $name
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          files: |
+            herdr-nvim-x86_64-pc-windows-msvc.exe
+            herdr-nvim-x86_64-pc-windows-msvc.exe.sha256
+            herdr-nvim-app-x86_64-pc-windows-msvc.zip
+            herdr-nvim-app-x86_64-pc-windows-msvc.zip.sha256

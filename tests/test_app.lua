@@ -129,13 +129,16 @@ T.test("app: an explorer window beside the file keeps it the current file (Previ
   app.settings = settings
   vim.cmd("edit " .. vim.fn.fnameescape(file))
   local function current() return vim.json.decode(vim.fn.readfile(dir .. "/current")[1]).file end
-  T.eq(current(), vim.uv.fs_realpath(file))
+  -- State is the app's wire path, not libuv's native Windows separators.
+  local expected = vim.uv.fs_realpath(file)
+  if vim.fn.has("win32") == 1 then expected = expected:gsub("\\", "/") end
+  T.eq(current(), expected)
   for _, ft in ipairs({ "snacks_layout_box", "snacks_picker_list", "snacks_picker_input", "neo-tree", "NvimTree" }) do
     -- As explorers open: a buffer with its filetype, then a window beside.
     local buf = vim.api.nvim_create_buf(false, true)
     vim.bo[buf].filetype = ft
     local win = vim.api.nvim_open_win(buf, true, { split = "right", win = 0 })
-    T.eq(current(), vim.uv.fs_realpath(file), ft .. ": still the file")
+    T.eq(current(), expected, ft .. ": still the file")
     vim.api.nvim_win_close(win, true)
     vim.api.nvim_buf_delete(buf, { force = true })
   end

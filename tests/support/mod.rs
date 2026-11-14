@@ -1,6 +1,6 @@
 //! Shared harness for the CLI tests: a sandbox that points every path the
 //! binary touches (runtime dir, state dir, config home) at a throwaway temp
-//! dir, a scriptable fake `herdr` on PATH (Unix), real nvim daemons
+//! dir, a fake `herdr` on PATH (script on Unix, native exe on Windows), real nvim daemons
 //! registered the way `ensure_daemon` registers them, and a kept artifact
 //! log under `target/test-artifacts/<test>/`.
 
@@ -15,6 +15,10 @@ use std::{
     thread::sleep,
     time::{Duration, Instant},
 };
+
+#[cfg(windows)]
+#[path = "../../src/daemon/namespace.rs"]
+mod namespace;
 
 pub fn nvim_available() -> bool {
     Command::new("nvim")
@@ -50,6 +54,23 @@ impl Sandbox {
             )
             .unwrap();
             fs::set_permissions(&herdr, fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        #[cfg(windows)]
+        {
+            static FAKE: std::sync::OnceLock<PathBuf> = std::sync::OnceLock::new();
+            let fake = FAKE.get_or_init(|| {
+                let output =
+                    env::temp_dir().join(format!("hn-fake-herdr-{}.exe", std::process::id()));
+                assert!(Command::new("rustc")
+                    .arg(Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/support/fake-herdr.rs"))
+                    .arg("-o")
+                    .arg(&output)
+                    .status()
+                    .expect("rustc required for isolated Windows tests")
+                    .success());
+                output
+            });
+            fs::copy(fake, dir.join("bin/herdr.exe")).unwrap();
         }
         Self { dir }
     }
@@ -102,7 +123,14 @@ impl Sandbox {
         command
             .args(args)
             .env("PATH", path)
-            .env("HERDR_BIN_PATH", self.dir.join("bin").join("herdr"))
+            .env(
+                "HERDR_BIN_PATH",
+                self.dir
+                    .join("bin")
+                    .join(if cfg!(windows) { "herdr.exe" } else { "herdr" }),
+            )
+            .env_remove("HERDR_NVIM_HOST")
+            .env_remove("HERDR_NVIM_SELF")
             .env("HOME", &self.dir)
             .env("HERDR_NVIM_RUNTIME_DIR", self.runtime())
             .env("HERDR_NVIM_STATE_DIR", self.dir.join("state"))
@@ -144,7 +172,10 @@ impl Sandbox {
     /// A registry entry nothing answers on (a daemon that died uncleanly).
     pub fn stale_entry(&self, tab: &str) -> PathBuf {
         let entry = self.entry(tab);
+        #[cfg(not(windows))]
         fs::write(&entry, tab).unwrap();
+        #[cfg(windows)]
+        fs::write(&entry, serde_json::json!({"version":2,"tab":tab,"endpoint":namespace::pipe(&self.runtime(), &tab.replace(':', "_"))}).to_string()).unwrap();
         entry
     }
 }
@@ -185,7 +216,7 @@ impl Daemon {
         #[cfg(not(windows))]
         let address = entry.clone();
         #[cfg(windows)]
-        let address = PathBuf::from(format!(r"\\.\pipe\herdr-nvim-{}", tab.replace(':', "_")));
+        let address = namespace::pipe(&sandbox.runtime(), &tab.replace(':', "_"));
         let child = Command::new("nvim")
             .args(["--headless", "--clean", "--listen"])
             .arg(&address)
@@ -198,7 +229,11 @@ impl Daemon {
             .spawn()
             .expect("spawn nvim");
         #[cfg(windows)]
-        fs::write(&entry, tab).unwrap();
+        fs::write(
+            &entry,
+            serde_json::json!({"version":2,"tab":tab,"endpoint":address}).to_string(),
+        )
+        .unwrap();
         let daemon = Self {
             tab: tab.to_owned(),
             entry,

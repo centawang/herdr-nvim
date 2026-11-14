@@ -19,7 +19,7 @@ struct Proc {
     ppid: u32,
     rss_bytes: u64,
     uptime_secs: u64,
-    /// The command line, its arguments joined by spaces (empty on Windows).
+    /// The command line (CIM on Windows, ps on Unix).
     args: String,
 }
 
@@ -80,13 +80,18 @@ impl ProcessTable {
 
     /// Every nvim process listening on `socket` (see `is_daemon`), sorted.
     /// Normally one: the daemon. Two when a launcher shim starts the real
-    /// nvim as its child instead of `exec`ing it. Always empty on Windows,
-    /// where command lines are not read.
+    /// nvim as its child instead of `exec`ing it. On Windows this is a
+    /// conservative liveness check only, never permission to kill a PID.
     pub(crate) fn listeners(&self, socket: &Path) -> Result<Vec<u32>> {
         let mut pids = Vec::new();
         // The snapshot's command lines rule out all but a few.
         for (&pid, proc_) in &self.procs {
-            if listens_on(&proc_.args, socket) && is_daemon(pid, socket)? {
+            #[cfg(unix)]
+            let matches = listens_on(&proc_.args, socket) && is_daemon(pid, socket)?;
+            // Used only to establish possible liveness, never to authorize a kill.
+            #[cfg(windows)]
+            let matches = listens_on(&proc_.args, socket);
+            if matches {
                 pids.push(pid);
             }
         }
@@ -127,8 +132,13 @@ impl ProcessTable {
 /// for `is_nvim` to say.
 fn listens_on(args: &str, socket: &Path) -> bool {
     let pair = format!(" --listen {}", socket.to_string_lossy());
-    args.match_indices(&pair)
-        .any(|(at, _)| matches!(args[at + pair.len()..].chars().next(), None | Some(' ')))
+    let plain = args
+        .match_indices(&pair)
+        .any(|(at, _)| matches!(args[at + pair.len()..].chars().next(), None | Some(' ')));
+    #[cfg(windows)]
+    return plain || args.contains(&format!(" --listen \"{}\"", socket.to_string_lossy()));
+    #[cfg(not(windows))]
+    plain
 }
 
 /// Whether `ps`'s command name (`comm`: the executable, unlike `args`,
@@ -172,12 +182,6 @@ fn is_daemon(pid: u32, socket: &Path) -> Result<bool> {
         return Ok(false);
     }
     Ok(ps_field(pid, "comm=")?.is_some_and(|name| is_nvim(&name)))
-}
-
-/// Windows: command lines are not read, so no process is known to be one.
-#[cfg(windows)]
-fn is_daemon(_pid: u32, _socket: &Path) -> Result<bool> {
-    Ok(false)
 }
 
 /// Wait up to `timeout` for `pid`, the nvim listening on `socket`, to exit
@@ -302,38 +306,79 @@ fn read_processes() -> Result<HashMap<u32, Proc>> {
         .collect())
 }
 
-/// Windows: one PowerShell `Get-CimInstance Win32_Process` call (slow-ish,
-/// ~1s, but only run by this manual command); working set stands in for RSS.
+/// Windows: a bounded PowerShell CIM snapshot for inventory and conservative
+/// liveness checks (about 1s locally); working set stands in for RSS.
 #[cfg(windows)]
 fn read_processes() -> Result<HashMap<u32, Proc>> {
-    let script = "$now = Get-Date; Get-CimInstance Win32_Process | ForEach-Object { \
-                  $up = if ($_.CreationDate) { [int64]($now - $_.CreationDate).TotalSeconds } else { 0 }; \
-                  \"$($_.ProcessId) $($_.ParentProcessId) $($_.WorkingSetSize) $up\" }";
-    let output = Command::new("powershell.exe")
-        .args(["-NoProfile", "-NonInteractive", "-Command", script])
-        .output()
-        .context("could not run powershell.exe")?;
-    if !output.status.success() {
-        bail!("Get-CimInstance Win32_Process failed ({})", output.status);
+    // ErrorAction Stop matters: PowerShell otherwise exits 0 after a CIM error.
+    // A remote-expr client may exit while CIM enumerates it. Requery that PID:
+    // only confirmed absence is Gone; unreadable live processes still fail closed.
+    let script = r#"$ErrorActionPreference='Stop'
+[Console]::OutputEncoding=[Text.UTF8Encoding]::new($false)
+$now=Get-Date
+$rows=@(Get-CimInstance Win32_Process -ErrorAction Stop | ForEach-Object {
+    $proc=$_
+    if ($proc.Name -like 'nvim*' -and -not $proc.CommandLine) {
+        $proc=Get-CimInstance Win32_Process -Filter "ProcessId = $([uint32]$proc.ProcessId)" -ErrorAction Stop
+        if ($null -eq $proc) { return }
+        if (-not $proc.CommandLine) { throw 'Cannot inspect an nvim command line; refusing to assume it exited' }
     }
-    let text = String::from_utf8_lossy(&output.stdout);
-    Ok(text
-        .lines()
-        .filter_map(|line| {
-            let mut fields = line.split_whitespace();
-            let pid = fields.next()?.parse().ok()?;
-            let ppid = fields.next()?.parse().ok()?;
-            let rss_bytes = fields.next()?.parse().ok()?;
-            let uptime_secs = fields.next()?.parse().ok()?;
-            Some((
-                pid,
+    @{pid=[uint32]$proc.ProcessId; ppid=[uint32]$proc.ParentProcessId; rss=[uint64]$proc.WorkingSetSize; up=if ($proc.CreationDate) {[uint64][Math]::Max(0,($now-$proc.CreationDate).TotalSeconds)} else {0}; args=[string]$proc.CommandLine}
+})
+ConvertTo-Json -Compress -InputObject $rows"#;
+    use std::{
+        process::Stdio,
+        thread::sleep,
+        time::{Duration, Instant},
+    };
+    let mut child = Command::new("powershell.exe")
+        .args(["-NoProfile", "-NonInteractive", "-Command", script])
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .context("could not run powershell.exe to inspect daemon processes")?;
+    let stdout = super::drain(child.stdout.take().expect("piped stdout"));
+    let stderr = super::drain(child.stderr.take().expect("piped stderr"));
+    let deadline = Instant::now() + Duration::from_secs(3);
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break status,
+            Ok(None) if Instant::now() < deadline => sleep(Duration::from_millis(20)),
+            _ => {
+                super::kill_client(&mut child)?;
+                bail!("process inspection timed out or failed; daemon state is unknown, nothing replaced");
+            }
+        }
+    };
+    let drained = Instant::now() + Duration::from_secs(1);
+    let text = super::output(stdout, drained);
+    let error = super::output(stderr, drained);
+    if !status.success() {
+        bail!("Get-CimInstance failed: {error}");
+    }
+    #[derive(serde::Deserialize)]
+    struct Row {
+        pid: u32,
+        ppid: u32,
+        rss: u64,
+        up: u64,
+        args: String,
+    }
+    let rows: Vec<Row> = serde_json::from_str(&text)
+        .context("invalid process snapshot (nothing considered gone)")?;
+    Ok(rows
+        .into_iter()
+        .map(|r| {
+            (
+                r.pid,
                 Proc {
-                    ppid,
-                    rss_bytes,
-                    uptime_secs,
-                    args: String::new(),
+                    ppid: r.ppid,
+                    rss_bytes: r.rss,
+                    uptime_secs: r.up,
+                    args: r.args,
                 },
-            ))
+            )
         })
         .collect())
 }
